@@ -21,8 +21,16 @@ from config import KALSHI_BASE_URL, settings
 
 
 def _load_private_key():
-    pem_path = Path(settings.kalshi_private_key_path)
-    pem_bytes = pem_path.read_bytes()
+    import os
+    # Railway / cloud: store full PEM content in KALSHI_PRIVATE_KEY env var.
+    # Local: fall back to reading from the file path.
+    raw = os.environ.get("KALSHI_PRIVATE_KEY", "").strip()
+    if raw:
+        # Most deployment dashboards can't store real newlines — allow \n literals
+        pem_bytes = raw.replace("\\n", "\n").encode()
+    else:
+        pem_path = Path(settings.kalshi_private_key_path)
+        pem_bytes = pem_path.read_bytes()
     return serialization.load_pem_private_key(pem_bytes, password=None)
 
 
