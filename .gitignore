@@ -1,0 +1,58 @@
+# ── Environment ────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+bot/.env
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+venv/
+env/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ── Node / Next.js ──────────────────────────────────────────────────────────
+node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/.vercel/
+*.tsbuildinfo
+dashboard/.env.local
+dashboard/.env.*.local
+
+# ── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ─────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+*.pem
+# Gmail OAuth2 — never commit these
+bot/gmail_credentials.json
+bot/gmail_token.json
+
+# ── Runtime state files — local only, never commit ───────────────────────────
+bot/kal.lock
+bot/kal_last_online.txt
+bot/kal_journal.txt
+bot/kal_journal_state.json
+bot/kal_performance.csv
+bot/kal_performance.xlsx
