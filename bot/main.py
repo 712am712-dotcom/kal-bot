@@ -42,7 +42,7 @@ from scheduled_analysis import (
     should_post_daily_briefing, mark_briefing_posted,
     should_post_weekly, mark_weekly_posted,
 )
-from gmail_reader import GmailReader, build_morning_brief, extract_todays_focus
+from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus
 from technical_analysis import TechnicalAnalyzer
 from performance_tracker import PerformanceTracker
 import journal as journal_mod
@@ -1452,11 +1452,21 @@ async def main_async() -> None:
     intel_scanner = IntelligenceScanner(kalshi)
     ta_analyzer   = TechnicalAnalyzer()
     news_intel    = NewsIntelligence(kalshi)
+    # IMAP: prefer KAL_EMAIL_ADDRESS/PASSWORD (Outlook/any provider),
+    # fall back to old KAL_GMAIL_ADDRESS/APP_PASSWORD for existing setups
+    _imap_addr = (
+        getattr(settings, "kal_email_address", "")
+        or getattr(settings, "kal_gmail_address", "")
+    )
+    _imap_pass = (
+        getattr(settings, "kal_email_password", "")
+        or getattr(settings, "kal_gmail_app_password", "")
+    )
     gmail_reader  = GmailReader(
         credentials_path=getattr(settings, "gmail_credentials_path", "./gmail_credentials.json"),
         token_path=getattr(settings, "gmail_token_path", "./gmail_token.json"),
-        imap_address=getattr(settings, "kal_gmail_address", ""),
-        imap_password=getattr(settings, "kal_gmail_app_password", ""),
+        imap_address=_imap_addr,
+        imap_password=_imap_pass,
     )
     # Callable that returns the override model when daily limit is hit
     def _model_override_fn() -> str | None:

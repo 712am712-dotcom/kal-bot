@@ -1,20 +1,20 @@
 """
-gmail_reader.py -- Reads Kal's daily financial newsletter from Gmail.
+email_reader.py -- Reads Kal's daily financial newsletter via IMAP.
 
-Two authentication methods -- auto-detected from env vars:
+Authentication priority:
+  1. IMAP (primary, Railway / 24x7):
+       Set KAL_EMAIL_ADDRESS and KAL_EMAIL_PASSWORD.
+       Works with Outlook, Gmail, Yahoo, or any IMAP-enabled mailbox.
+       No browser required. Works headless forever.
+       IMAP server is auto-detected from the email domain:
+         @outlook.com / @hotmail.com / @live.com -> outlook.office365.com:993
+         @gmail.com                              -> imap.gmail.com:993
+         anything else                           -> outlook.office365.com:993 (generic)
 
-  IMAP + App Password (Railway / 24x7):
-    Set KAL_GMAIL_ADDRESS and KAL_GMAIL_APP_PASSWORD in Railway Variables.
-    No browser required. Works headless forever.
-    Setup: myaccount.google.com -> Security -> App Passwords -> Mail
-
-  OAuth2 (local development):
-    Set GMAIL_CREDENTIALS_PATH and GMAIL_TOKEN_PATH.
-    First run opens browser for one-time authorization.
-    Requires google-auth / google-api-python-client packages.
-
-If KAL_GMAIL_ADDRESS + KAL_GMAIL_APP_PASSWORD are both set, IMAP is used.
-Otherwise falls back to OAuth2 (for local use).
+  2. OAuth2 (local development fallback):
+       Set GMAIL_CREDENTIALS_PATH and GMAIL_TOKEN_PATH.
+       First run opens browser for one-time authorization.
+       Requires google-auth / google-api-python-client packages.
 
 Never sends, deletes, or modifies any email. Read-only.
 """
@@ -35,8 +35,24 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-SCOPES  = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES   = ["https://www.googleapis.com/auth/gmail.readonly"]
 _BOT_DIR = Path(__file__).parent
+
+# IMAP server lookup by domain suffix
+_IMAP_SERVERS: dict[str, tuple[str, int]] = {
+    "gmail.com":    ("imap.gmail.com",         993),
+    "outlook.com":  ("outlook.office365.com",  993),
+    "hotmail.com":  ("outlook.office365.com",  993),
+    "live.com":     ("outlook.office365.com",  993),
+    "yahoo.com":    ("imap.mail.yahoo.com",     993),
+}
+_DEFAULT_IMAP_SERVER = ("outlook.office365.com", 993)
+
+
+def _imap_server_for(email_address: str) -> tuple[str, int]:
+    """Return (host, port) for the given email address domain."""
+    domain = email_address.lower().split("@")[-1] if "@" in email_address else ""
+    return _IMAP_SERVERS.get(domain, _DEFAULT_IMAP_SERVER)
 
 
 def _resolve_path(p: str) -> Path:
@@ -91,27 +107,33 @@ def _extract_body_from_payload(payload: dict) -> str:
     return ""
 
 
-# ---- IMAP / App Password method (Railway) ------------------------------------
+# ---- IMAP fetch (Outlook / Gmail / any provider) -----------------------------
 
-def _imap_fetch_sync(gmail_address: str, app_password: str, sender_email: str) -> str | None:
+def _imap_fetch_sync(
+    email_address: str,
+    password: str,
+    sender_email: str,
+) -> str | None:
     """
     Synchronous IMAP fetch -- run in a thread executor.
-    Connects to Gmail IMAP with the App Password and searches for today's
-    email from sender_email. Returns the plain-text body or None.
+    Auto-detects IMAP server from email_address domain.
+    Searches for today's email from sender_email.
+    Returns plain-text body or None.
     """
-    today = datetime.date.today()
-    since_str = today.strftime("%d-%b-%Y")   # IMAP format: 23-Mar-2026
+    host, port = _imap_server_for(email_address)
+    today      = datetime.date.today()
+    since_str  = today.strftime("%d-%b-%Y")   # IMAP format: 23-Mar-2026
 
     try:
-        with imaplib.IMAP4_SSL("imap.gmail.com", 993) as mail:
-            mail.login(gmail_address, app_password)
+        with imaplib.IMAP4_SSL(host, port) as mail:
+            mail.login(email_address, password)
             mail.select("INBOX")
 
-            # Search by sender + date
+            # Search by sender + date window
             _, data = mail.search(None, f'FROM "{sender_email}" SINCE "{since_str}"')
             msg_ids = data[0].split()
             if not msg_ids:
-                log.debug("[gmail-imap] no newsletter from %s since %s", sender_email, since_str)
+                log.debug("[email-imap] no newsletter from %s since %s", sender_email, since_str)
                 return None
 
             # Fetch the most recent match (last ID = newest in IMAP)
@@ -136,7 +158,8 @@ def _imap_fetch_sync(gmail_address: str, app_password: str, sender_email: str) -
                 payload = part.get_payload(decode=True)
                 if not payload:
                     continue
-                text = payload.decode(part.get_content_charset("utf-8") or "utf-8", errors="replace")
+                charset = part.get_content_charset("utf-8") or "utf-8"
+                text    = payload.decode(charset, errors="replace")
                 if ct == "text/plain":
                     body = text
                     break
@@ -145,34 +168,36 @@ def _imap_fetch_sync(gmail_address: str, app_password: str, sender_email: str) -
         else:
             payload = msg.get_payload(decode=True)
             if payload:
-                text = payload.decode(msg.get_content_charset("utf-8") or "utf-8", errors="replace")
-                body = text if msg.get_content_type() == "text/plain" else _strip_html(text)
+                charset = msg.get_content_charset("utf-8") or "utf-8"
+                text    = payload.decode(charset, errors="replace")
+                body    = text if msg.get_content_type() == "text/plain" else _strip_html(text)
 
         if not body:
-            log.warning("[gmail-imap] newsletter found but body is empty: %s", subject[:60])
+            log.warning("[email-imap] newsletter found but body is empty: %s", subject[:60])
             return None
 
-        log.info("[gmail-imap] newsletter found: %s (%d chars)", subject[:60], len(body))
+        log.info("[email-imap] newsletter found: %s (%d chars)", subject[:60], len(body))
         return body
 
     except imaplib.IMAP4.error as exc:
-        # Authentication failure -- clear message for logs
         msg_str = str(exc)
-        if "AUTHENTICATIONFAILED" in msg_str or "Invalid credentials" in msg_str:
+        if "AUTHENTICATIONFAILED" in msg_str or "Invalid credentials" in msg_str or "Authentication unsuccessful" in msg_str:
             log.error(
-                "[gmail-imap] authentication failed -- check KAL_GMAIL_ADDRESS "
-                "and KAL_GMAIL_APP_PASSWORD. App Password must be enabled at "
-                "myaccount.google.com -> Security -> App Passwords"
+                "[email-imap] authentication failed for %s on %s -- "
+                "check KAL_EMAIL_ADDRESS and KAL_EMAIL_PASSWORD. "
+                "For Outlook: use your regular account password. "
+                "For Gmail: use an App Password from myaccount.google.com/apppasswords.",
+                email_address, host,
             )
         else:
-            log.warning("[gmail-imap] IMAP error: %s", exc)
+            log.warning("[email-imap] IMAP error on %s: %s", host, exc)
         return None
     except Exception as exc:
-        log.warning("[gmail-imap] fetch failed: %s", exc)
+        log.warning("[email-imap] fetch failed on %s: %s", host, exc)
         return None
 
 
-# ---- OAuth2 method (local development) --------------------------------------
+# ---- OAuth2 method (local development fallback) ------------------------------
 
 def _build_gmail_service(credentials_path: str, token_path: str) -> Any:
     """
@@ -352,48 +377,47 @@ async def build_morning_brief(
         else in_tok * 15.0 / 1_000_000 + out_tok * 75.0 / 1_000_000
     )
 
-    log.info("[gmail] brief built: %d chars, cost=$%.4f, model=%s", len(brief), cost, active_model)
+    log.info("[email] brief built: %d chars, cost=$%.4f, model=%s", len(brief), cost, active_model)
     return brief, round(cost, 6)
 
 
-# ---- GmailReader orchestrator ------------------------------------------------
+# ---- EmailReader orchestrator ------------------------------------------------
 
-class GmailReader:
+class EmailReader:
     """
     Fetches the morning newsletter and builds the morning brief.
 
     Auth priority:
-      1. IMAP + App Password  -- if imap_address + imap_password both set
-      2. OAuth2               -- if credentials_path file exists
+      1. IMAP (KAL_EMAIL_ADDRESS + KAL_EMAIL_PASSWORD) -- works with Outlook,
+         Gmail, Yahoo, or any IMAP provider. No browser. 24/7 on Railway.
+      2. OAuth2 (GMAIL_CREDENTIALS_PATH) -- local development only.
 
     Tracks whether the brief has been posted today to avoid duplicates.
     """
 
     def __init__(
         self,
-        credentials_path: str,
-        token_path: str,
+        credentials_path: str = "./gmail_credentials.json",
+        token_path: str = "./gmail_token.json",
         imap_address: str = "",
         imap_password: str = "",
     ) -> None:
-        self._creds_path   = str(_resolve_path(credentials_path))
-        self._token_path   = str(_resolve_path(token_path))
-        self._imap_address = imap_address.strip()
+        self._creds_path    = str(_resolve_path(credentials_path))
+        self._token_path    = str(_resolve_path(token_path))
+        self._imap_address  = imap_address.strip()
         self._imap_password = imap_password.strip()
         self._oauth2_service: Any = None
         self._posted_date: str = ""
 
     @property
     def _use_imap(self) -> bool:
-        """True when App Password credentials are available -- prefer over OAuth2."""
+        """True when IMAP credentials are available -- preferred over OAuth2."""
         return bool(self._imap_address and self._imap_password)
 
     @property
     def is_configured(self) -> bool:
-        """True if either auth method is available."""
-        if self._use_imap:
-            return True
-        return Path(self._creds_path).exists()
+        """True if any auth method is available."""
+        return self._use_imap or Path(self._creds_path).exists()
 
     # ---- IMAP fetch ----------------------------------------------------------
 
@@ -438,18 +462,19 @@ class GmailReader:
     async def fetch_newsletter(self, sender_email: str) -> str | None:
         """
         Fetch today's newsletter from sender_email.
-        Uses IMAP (App Password) when configured, otherwise OAuth2.
+        Uses IMAP when configured, otherwise falls back to OAuth2.
         Returns body text or None.
         """
         if not self.is_configured:
-            log.debug("[gmail] not configured -- no credentials found")
+            log.debug("[email] not configured -- no credentials found")
             return None
 
         if self._use_imap:
-            log.debug("[gmail] using IMAP/App Password auth")
+            host, _ = _imap_server_for(self._imap_address)
+            log.debug("[email] using IMAP on %s for %s", host, self._imap_address)
             return await self._fetch_imap(sender_email)
         else:
-            log.debug("[gmail] using OAuth2 auth")
+            log.debug("[email] using OAuth2 (local fallback)")
             return await self._fetch_oauth2(sender_email)
 
     def already_posted_today(self) -> bool:
@@ -457,6 +482,10 @@ class GmailReader:
 
     def mark_posted(self) -> None:
         self._posted_date = datetime.date.today().isoformat()
+
+
+# Backward-compatible alias so existing imports keep working
+GmailReader = EmailReader
 
 
 # ---- Convenience export ------------------------------------------------------

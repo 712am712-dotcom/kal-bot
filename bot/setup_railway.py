@@ -22,14 +22,15 @@ ENV_FILE = BOT_DIR / ".env"
 PEM_FILE = BOT_DIR / "kalshi_private_key.pem"
 
 # ---- Variables to skip -------------------------------------------------------
-# File paths and Gmail OAuth2 flows that are meaningless on Railway
+# File paths and OAuth2 flows that are meaningless on Railway
 
 SKIP_VARS = {
     "KALSHI_PRIVATE_KEY_PATH",   # replaced by KALSHI_PRIVATE_KEY content below
     "KALSHI_DEMO",               # set explicitly in OVERRIDES
-    "NEWSLETTER_EMAIL",          # Gmail OAuth2 requires a browser -- skip on Railway
-    "GMAIL_CREDENTIALS_PATH",    # same reason
-    "GMAIL_TOKEN_PATH",          # same reason
+    "GMAIL_CREDENTIALS_PATH",    # local file path -- not used on Railway
+    "GMAIL_TOKEN_PATH",          # local file path -- not used on Railway
+    "KAL_GMAIL_ADDRESS",         # legacy -- use KAL_EMAIL_ADDRESS instead
+    "KAL_GMAIL_APP_PASSWORD",    # legacy -- use KAL_EMAIL_PASSWORD instead
 }
 
 # ---- Railway-specific overrides -- always win over .env ----------------------
