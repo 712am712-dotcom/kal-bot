@@ -44,34 +44,37 @@ CHANNEL_ORDER = [ch for _, chs in CATEGORIES for ch in chs]
 
 def make_kal_avatar() -> bytes:
     """
-    Generate the Kal bot avatar: 256×256 green square (#00C076) with 'Kal.' in white.
+    Generate the Kal bot avatar: 512×512 green square (#00C076) with 'Kal' in white.
     Uses Pillow when available; falls back to a solid green PNG with no text.
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
 
-        size  = 256
+        size  = 512
         green = (0, 192, 118)   # #00C076
         img   = Image.new("RGB", (size, size), color=green)
         draw  = ImageDraw.Draw(img)
-        text  = "Kal."
+        text  = "Kal"
 
         # Try common bold font names across Windows / Linux / macOS
         font: Any = None
-        for name in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf",
-                     "DejaVuSans.ttf", "Helvetica.ttc", "Helvetica.dfont"):
+        for name, fsize in [
+            ("arialbd.ttf", 230), ("arial.ttf", 230),
+            ("DejaVuSans-Bold.ttf", 230), ("DejaVuSans.ttf", 230),
+            ("Helvetica.ttc", 230), ("Helvetica.dfont", 230),
+        ]:
             try:
-                font = ImageFont.truetype(name, 80)
+                font = ImageFont.truetype(name, fsize)
                 break
             except Exception:
                 pass
         if font is None:
-            font = ImageFont.load_default(size=80)
+            font = ImageFont.load_default(size=200)
 
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         draw.text(
-            ((size - tw) // 2, (size - th) // 2 - 4),
+            ((size - tw) // 2 - bbox[0], (size - th) // 2 - bbox[1]),
             text, fill=(255, 255, 255), font=font,
         )
 
@@ -121,48 +124,61 @@ class DiscordBot:
         self._bot_id:      int | None        = None
         self._channel_ids: dict[str, int]    = {}
 
-    # ── Raw HTTP ──────────────────────────────────────────────────────────────
+    # ── Raw HTTP (with 429 retry) ──────────────────────────────────────────────
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """
+        Execute one HTTP request against the Discord API.
+        On 429 (rate limit): wait for Retry-After (or 30s fallback) then retry once.
+        """
+        url = f"{BASE_URL}{path}"
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                r = await c.request(method, url, headers=self._headers, **kwargs)
+            if r.status_code == 429:
+                retry_after = float(r.headers.get("retry-after", 30))
+                wait = max(retry_after, 30)
+                log.warning("[discord_bot] 429 on %s %s — waiting %.0fs", method, path, wait)
+                await asyncio.sleep(wait)
+                continue
+            return r
+        # Final attempt — let the caller deal with the error
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            return await c.request(method, url, headers=self._headers, **kwargs)
 
     async def _get(self, path: str) -> Any:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(f"{BASE_URL}{path}", headers=self._headers)
-            r.raise_for_status()
-            return r.json()
+        r = await self._request("GET", path)
+        r.raise_for_status()
+        return r.json()
 
     async def _post(self, path: str, data: dict) -> Any:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.post(f"{BASE_URL}{path}", headers=self._headers, json=data)
-            r.raise_for_status()
-            return r.json() if r.content else {}
+        r = await self._request("POST", path, json=data)
+        r.raise_for_status()
+        return r.json() if r.content else {}
 
     async def _patch(self, path: str, data: dict) -> Any:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.patch(f"{BASE_URL}{path}", headers=self._headers, json=data)
-            r.raise_for_status()
-            return r.json() if r.content else {}
+        r = await self._request("PATCH", path, json=data)
+        r.raise_for_status()
+        return r.json() if r.content else {}
 
     async def _put(self, path: str) -> None:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.put(f"{BASE_URL}{path}", headers=self._headers)
-            if r.status_code not in (200, 204):
-                r.raise_for_status()
+        r = await self._request("PUT", path)
+        if r.status_code not in (200, 204):
+            r.raise_for_status()
 
     async def _delete(self, path: str) -> None:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.delete(f"{BASE_URL}{path}", headers=self._headers)
-            if r.status_code not in (200, 204):
-                r.raise_for_status()
+        r = await self._request("DELETE", path)
+        if r.status_code not in (200, 204):
+            r.raise_for_status()
 
     async def _delete_message(self, channel_id: int, message_id: int) -> None:
         """Delete a single message. Silently ignores 404 (already gone)."""
         try:
-            async with httpx.AsyncClient(timeout=15.0) as c:
-                r = await c.delete(
-                    f"{BASE_URL}/channels/{channel_id}/messages/{message_id}",
-                    headers=self._headers,
-                )
-                if r.status_code not in (200, 204, 404):
-                    r.raise_for_status()
+            r = await self._request(
+                "DELETE", f"/channels/{channel_id}/messages/{message_id}"
+            )
+            if r.status_code not in (200, 204, 404):
+                r.raise_for_status()
         except Exception as exc:
             log.debug("[discord_bot] delete_message %s: %s", message_id, exc)
 
