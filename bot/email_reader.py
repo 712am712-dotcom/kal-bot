@@ -1,20 +1,29 @@
 """
-email_reader.py -- Reads Kal's daily financial newsletter via IMAP.
+email_reader.py -- Reads Kal's daily financial newsletters via IMAP.
 
 Authentication priority:
   1. IMAP (primary, Railway / 24x7):
        Set KAL_EMAIL_ADDRESS and KAL_EMAIL_PASSWORD.
-       Works with Outlook, Gmail, Yahoo, or any IMAP-enabled mailbox.
+       Works with Gmail, Outlook, Yahoo, or any IMAP-enabled mailbox.
        No browser required. Works headless forever.
-       IMAP server is auto-detected from the email domain:
-         @outlook.com / @hotmail.com / @live.com -> outlook.office365.com:993
+       IMAP server auto-detected from the email domain:
          @gmail.com                              -> imap.gmail.com:993
-         anything else                           -> outlook.office365.com:993 (generic)
+         @outlook.com / @hotmail.com / @live.com -> outlook.office365.com:993
+         anything else                           -> outlook.office365.com:993
+
+       Gmail note: You MUST use an App Password, not your regular password.
+         1. Go to myaccount.google.com -> Security -> 2-Step Verification (enable)
+         2. Go to myaccount.google.com -> Security -> App Passwords
+         3. Select "Mail" / "Windows Computer" -> Generate
+         4. Copy the 16-char password into KAL_EMAIL_PASSWORD
 
   2. OAuth2 (local development fallback):
        Set GMAIL_CREDENTIALS_PATH and GMAIL_TOKEN_PATH.
        First run opens browser for one-time authorization.
-       Requires google-auth / google-api-python-client packages.
+
+Multiple newsletters: set NEWSLETTER_EMAILS as a comma-separated list.
+All newsletters found are fetched in ONE IMAP connection and synthesized
+into a single morning brief with ONE Claude call.
 
 Never sends, deletes, or modifies any email. Read-only.
 """
@@ -38,7 +47,7 @@ log = logging.getLogger(__name__)
 SCOPES   = ["https://www.googleapis.com/auth/gmail.readonly"]
 _BOT_DIR = Path(__file__).parent
 
-# IMAP server lookup by domain suffix
+# IMAP server lookup by domain
 _IMAP_SERVERS: dict[str, tuple[str, int]] = {
     "gmail.com":    ("imap.gmail.com",         993),
     "outlook.com":  ("outlook.office365.com",  993),
@@ -50,7 +59,6 @@ _DEFAULT_IMAP_SERVER = ("outlook.office365.com", 993)
 
 
 def _imap_server_for(email_address: str) -> tuple[str, int]:
-    """Return (host, port) for the given email address domain."""
     domain = email_address.lower().split("@")[-1] if "@" in email_address else ""
     return _IMAP_SERVERS.get(domain, _DEFAULT_IMAP_SERVER)
 
@@ -65,7 +73,6 @@ def _resolve_path(p: str) -> Path:
 # ---- HTML / body helpers -----------------------------------------------------
 
 def _strip_html(raw_html: str) -> str:
-    """Strip HTML tags and decode entities, preserving readable structure."""
     raw_html = re.sub(r"<script[^>]*>.*?</script>", " ", raw_html, flags=re.DOTALL | re.IGNORECASE)
     raw_html = re.sub(r"<style[^>]*>.*?</style>",   " ", raw_html, flags=re.DOTALL | re.IGNORECASE)
     raw_html = re.sub(r"<br\s*/?>",                 "\n", raw_html, flags=re.IGNORECASE)
@@ -77,7 +84,6 @@ def _strip_html(raw_html: str) -> str:
 
 
 def _decode_body_data(data: str) -> str:
-    """Decode base64url-encoded Gmail API body data."""
     try:
         return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
     except Exception:
@@ -107,103 +113,107 @@ def _extract_body_from_payload(payload: dict) -> str:
     return ""
 
 
-# ---- IMAP fetch (Outlook / Gmail / any provider) -----------------------------
+def _parse_body_from_message(msg: email_mod.message.Message) -> str:
+    """Extract plain-text body from a parsed email.message.Message."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct      = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset("utf-8") or "utf-8"
+            text    = payload.decode(charset, errors="replace")
+            if ct == "text/plain":
+                body = text
+                break
+            if ct == "text/html" and not body:
+                body = _strip_html(text)
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset("utf-8") or "utf-8"
+            text    = payload.decode(charset, errors="replace")
+            body    = text if msg.get_content_type() == "text/plain" else _strip_html(text)
+    return body
 
-def _imap_fetch_sync(
+
+# ---- IMAP batch fetch (one connection, all senders) --------------------------
+
+def _imap_fetch_all_sync(
     email_address: str,
     password: str,
-    sender_email: str,
-) -> str | None:
+    senders: list[str],
+) -> dict[str, str]:
     """
-    Synchronous IMAP fetch -- run in a thread executor.
-    Auto-detects IMAP server from email_address domain.
-    Searches for today's email from sender_email.
-    Returns plain-text body or None.
+    Open ONE IMAP connection, search for today's email from each sender,
+    return {sender_email: body_text} for every newsletter found.
+    Skips senders with no email today -- never fails the whole batch.
     """
     host, port = _imap_server_for(email_address)
     today      = datetime.date.today()
-    since_str  = today.strftime("%d-%b-%Y")   # IMAP format: 23-Mar-2026
+    since_str  = today.strftime("%d-%b-%Y")   # IMAP: 23-Mar-2026
+    results: dict[str, str] = {}
 
     try:
         with imaplib.IMAP4_SSL(host, port) as mail:
             mail.login(email_address, password)
             mail.select("INBOX")
 
-            # Search by sender + date window
-            _, data = mail.search(None, f'FROM "{sender_email}" SINCE "{since_str}"')
-            msg_ids = data[0].split()
-            if not msg_ids:
-                log.debug("[email-imap] no newsletter from %s since %s", sender_email, since_str)
-                return None
+            for sender in senders:
+                try:
+                    _, data = mail.search(None, f'FROM "{sender}" SINCE "{since_str}"')
+                    msg_ids = data[0].split()
+                    if not msg_ids:
+                        log.debug("[email-imap] no email from %s since %s", sender, since_str)
+                        continue
 
-            # Fetch the most recent match (last ID = newest in IMAP)
-            _, msg_data = mail.fetch(msg_ids[-1], "(RFC822)")
-            raw = msg_data[0][1]
+                    # Fetch most recent match
+                    _, msg_data = mail.fetch(msg_ids[-1], "(RFC822)")
+                    raw = msg_data[0][1]
+                    msg = email_mod.message_from_bytes(raw)
 
-        msg = email_mod.message_from_bytes(raw)
+                    # Decode subject for logging
+                    subj_raw = _decode_header(msg.get("Subject", ""))[0]
+                    subject  = (
+                        subj_raw[0].decode(subj_raw[1] or "utf-8")
+                        if isinstance(subj_raw[0], bytes)
+                        else (subj_raw[0] or "")
+                    )
 
-        # Decode subject for logging
-        subj_raw = _decode_header(msg.get("Subject", ""))[0]
-        subject  = (
-            subj_raw[0].decode(subj_raw[1] or "utf-8")
-            if isinstance(subj_raw[0], bytes)
-            else (subj_raw[0] or "")
-        )
+                    body = _parse_body_from_message(msg)
+                    if not body:
+                        log.warning("[email-imap] empty body from %s: %s", sender, subject[:60])
+                        continue
 
-        # Extract body -- prefer text/plain, fall back to text/html
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ct      = part.get_content_type()
-                payload = part.get_payload(decode=True)
-                if not payload:
+                    log.info("[email-imap] found from %s: %s (%d chars)", sender, subject[:60], len(body))
+                    results[sender] = body
+
+                except Exception as exc:
+                    log.warning("[email-imap] error fetching from %s: %s", sender, exc)
                     continue
-                charset = part.get_content_charset("utf-8") or "utf-8"
-                text    = payload.decode(charset, errors="replace")
-                if ct == "text/plain":
-                    body = text
-                    break
-                if ct == "text/html" and not body:
-                    body = _strip_html(text)
-        else:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                charset = msg.get_content_charset("utf-8") or "utf-8"
-                text    = payload.decode(charset, errors="replace")
-                body    = text if msg.get_content_type() == "text/plain" else _strip_html(text)
-
-        if not body:
-            log.warning("[email-imap] newsletter found but body is empty: %s", subject[:60])
-            return None
-
-        log.info("[email-imap] newsletter found: %s (%d chars)", subject[:60], len(body))
-        return body
 
     except imaplib.IMAP4.error as exc:
         msg_str = str(exc)
-        if "AUTHENTICATIONFAILED" in msg_str or "Invalid credentials" in msg_str or "Authentication unsuccessful" in msg_str:
+        if any(k in msg_str for k in ("AUTHENTICATIONFAILED", "Invalid credentials", "Authentication unsuccessful")):
             log.error(
                 "[email-imap] authentication failed for %s on %s -- "
                 "check KAL_EMAIL_ADDRESS and KAL_EMAIL_PASSWORD. "
-                "For Outlook: use your regular account password. "
-                "For Gmail: use an App Password from myaccount.google.com/apppasswords.",
+                "Gmail requires an App Password (not your regular password): "
+                "myaccount.google.com -> Security -> App Passwords",
                 email_address, host,
             )
         else:
             log.warning("[email-imap] IMAP error on %s: %s", host, exc)
-        return None
     except Exception as exc:
-        log.warning("[email-imap] fetch failed on %s: %s", host, exc)
-        return None
+        log.warning("[email-imap] connection failed to %s: %s", host, exc)
+
+    return results
 
 
 # ---- OAuth2 method (local development fallback) ------------------------------
 
 def _build_gmail_service(credentials_path: str, token_path: str) -> Any:
-    """
-    Synchronous -- loads or creates OAuth2 credentials and returns a Gmail service.
-    On first run (no token), opens a browser for one-time authorization.
-    """
     try:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
@@ -238,7 +248,6 @@ def _build_gmail_service(credentials_path: str, token_path: str) -> Any:
 
 
 def _oauth2_fetch_sync(service: Any, sender_email: str) -> str | None:
-    """Synchronous -- search Gmail API for today's newsletter."""
     today = datetime.date.today()
     query = f"from:{sender_email} after:{today.strftime('%Y/%m/%d')}"
     result = service.users().messages().list(userId="me", q=query, maxResults=3).execute()
@@ -260,27 +269,40 @@ def _oauth2_fetch_sync(service: Any, sender_email: str) -> str | None:
         if header.get("name", "").lower() == "subject":
             subject = header.get("value", "")
             break
-    log.info("[gmail-oauth2] newsletter found: %s (%d chars)", subject[:60], len(body))
+    log.info("[gmail-oauth2] found from %s: %s (%d chars)", sender_email, subject[:60], len(body))
     return body
+
+
+def _oauth2_fetch_all_sync(service: Any, senders: list[str]) -> dict[str, str]:
+    """Fetch all senders via OAuth2. Returns {sender: body}."""
+    results: dict[str, str] = {}
+    for sender in senders:
+        try:
+            body = _oauth2_fetch_sync(service, sender)
+            if body:
+                results[sender] = body
+        except Exception as exc:
+            log.warning("[gmail-oauth2] error fetching from %s: %s", sender, exc)
+    return results
 
 
 # ---- Claude brief builder ----------------------------------------------------
 
 BRIEF_SYSTEM = """\
-You are Kal, an expert prediction market and financial analyst.
-You read morning financial newsletters and distill them into fast, actionable
-trading intelligence. Every point must have a market implication -- if it
-doesn't affect markets, skip it. Write like a trader briefing another trader.
+You are Kal, a financial intelligence analyst and expert prediction market trader.
+You read morning financial newsletters and synthesize them into fast, actionable
+trading intelligence. Write like a trader briefing another trader.
+Every item must answer: so what does this mean for markets?
 Fast, direct, no fluff. Under 15 words per bullet.
 """
 
 BRIEF_PROMPT = """\
-Today is {date}. Read this financial newsletter and produce a morning brief.
+Today is {date}. Below are today's financial newsletters. Read all of them,
+de-duplicate overlapping stories, and synthesize into ONE unified morning brief.
 
-NEWSLETTER TEXT:
-{newsletter}
+{newsletter_block}
 
-TOP KALSHI MARKETS RIGHT NOW (for the Prediction Market Angle section):
+TOP KALSHI MARKETS RIGHT NOW:
 {kalshi_block}
 
 Produce EXACTLY this format -- every section is mandatory:
@@ -290,53 +312,76 @@ Produce EXACTLY this format -- every section is mandatory:
 
 **MACRO**
 - [Item] -- [market implication in under 15 words]
-- [Item] -- [market implication in under 15 words]
-(2-4 bullets, only items that move markets)
+(2-4 bullets, only items that actually move markets)
 
 **CRYPTO**
 - [Item] -- [1-line implication for BTC/ETH/SOL]
 (1-3 bullets, crypto-specific news only)
 
-**EARNINGS** (omit section entirely if no earnings in newsletter)
-- [Company] beat/missed -- [one word reason]
+**AI & TECH**
+- [Item] -- [market impact in under 15 words]
+(1-3 bullets, major AI/tech developments that affect markets)
 
-**BIG MONEY MOVING**
-- [Notable deal/funding/move] -- why it matters for markets
-(1-3 bullets, significant capital flows only)
+**BIG MONEY**
+- [Notable deal/funding/institutional flow] -- why it matters
+(1-3 bullets, significant capital movements only)
 
 **TRADER'S ANGLE**
 - Stocks: [Key movers, sectors showing strength/weakness]
-- Crypto: [BTC/ETH/SOL overnight action, sentiment, key levels if mentioned]
+- Crypto: [BTC/ETH/SOL overnight action, sentiment, key levels]
 - Commodities: [Oil, gold, silver -- significant moves only]
-- Rates: [Bond market, yield curve, Fed implications if mentioned]
+- Rates: [Bond market, yield curve, Fed implications]
 - Sectors: [Which sectors leading/lagging and why]
 - Setup of the day: [One specific trade setup worth watching today]
 
 **PREDICTION MARKET ANGLE**
-[2-3 sentences connecting today's headlines to Kalshi prediction markets. Be specific -- name actual markets from the list above and their current prices. Explain why they might be mispriced given today's news.]
+[2-3 sentences connecting today's headlines to Kalshi prediction markets.
+Name actual markets from the list above with their current prices.
+Explain why they might be mispriced given today's news.]
 
 **TODAY'S FOCUS**
-[1-2 sentences -- the single most important thing to watch today and why it matters for prediction markets specifically]
+[1-2 sentences -- the single most important thing to watch today and why
+it matters specifically for prediction markets]
 
 Rules:
-- Every bullet must have a direct market implication -- skip anything else
-- Prediction market angle is MANDATORY -- always connect news to Kalshi
+- Every bullet must have a direct market implication -- skip anything that doesn't
+- De-duplicate: if multiple newsletters cover the same story, combine into one bullet
+- PREDICTION MARKET ANGLE is MANDATORY -- always connect news to Kalshi
 - Keep each bullet under 15 words
 - TODAY'S FOCUS must be prediction-market oriented
-- If a section genuinely has no content from the newsletter, write "-- nothing notable today"
+- If a section genuinely has no content, write "-- nothing notable today"
 """
 
 
 async def build_morning_brief(
-    newsletter_text: str,
+    newsletters: dict[str, str] | str,
     kalshi_markets: list[dict],
     model_override: str | None = None,
 ) -> tuple[str, float]:
-    """Build the morning brief from newsletter text (ONE Claude call)."""
+    """
+    Build the synthesized morning brief from one or more newsletters.
+
+    newsletters: dict {sender -> body_text} for multi-newsletter mode,
+                 or a plain str for backward compat (treated as single newsletter).
+    """
     from config import settings
     import anthropic
 
     date_str = datetime.datetime.now().strftime("%A, %B %-d")
+
+    # Normalize to dict
+    if isinstance(newsletters, str):
+        newsletters = {"newsletter": newsletters}
+
+    # Build the newsletter block with clear separators
+    parts: list[str] = []
+    for i, (sender, body) in enumerate(newsletters.items(), 1):
+        trimmed = body[:6000]
+        if len(body) > 6000:
+            trimmed += "\n... [truncated]"
+        label = f"NEWSLETTER {i} (from {sender})"
+        parts.append(f"{'=' * 60}\n{label}\n{'=' * 60}\n{trimmed}")
+    newsletter_block = "\n\n".join(parts)
 
     sorted_m = sorted(
         kalshi_markets,
@@ -349,13 +394,9 @@ async def build_morning_brief(
         for m in sorted_m
     ) or "No markets loaded"
 
-    newsletter_trimmed = newsletter_text[:8000]
-    if len(newsletter_text) > 8000:
-        newsletter_trimmed += "\n... [truncated]"
-
     prompt = BRIEF_PROMPT.format(
         date=date_str,
-        newsletter=newsletter_trimmed,
+        newsletter_block=newsletter_block,
         kalshi_block=kalshi_block,
     )
 
@@ -363,7 +404,7 @@ async def build_morning_brief(
     client  = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=active_model,
-        max_tokens=1200,
+        max_tokens=1400,
         system=BRIEF_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -377,7 +418,11 @@ async def build_morning_brief(
         else in_tok * 15.0 / 1_000_000 + out_tok * 75.0 / 1_000_000
     )
 
-    log.info("[email] brief built: %d chars, cost=$%.4f, model=%s", len(brief), cost, active_model)
+    n = len(newsletters)
+    log.info(
+        "[email] brief built from %d newsletter(s): %d chars, cost=$%.4f, model=%s",
+        n, len(brief), cost, active_model,
+    )
     return brief, round(cost, 6)
 
 
@@ -385,14 +430,14 @@ async def build_morning_brief(
 
 class EmailReader:
     """
-    Fetches the morning newsletter and builds the morning brief.
+    Fetches morning newsletters (one or many senders) and builds the brief.
 
     Auth priority:
-      1. IMAP (KAL_EMAIL_ADDRESS + KAL_EMAIL_PASSWORD) -- works with Outlook,
-         Gmail, Yahoo, or any IMAP provider. No browser. 24/7 on Railway.
-      2. OAuth2 (GMAIL_CREDENTIALS_PATH) -- local development only.
+      1. IMAP (KAL_EMAIL_ADDRESS + KAL_EMAIL_PASSWORD) -- Outlook, Gmail, any.
+         Opens ONE connection per check. Fetches ALL senders in that connection.
+      2. OAuth2 (GMAIL_CREDENTIALS_PATH) -- local dev fallback.
 
-    Tracks whether the brief has been posted today to avoid duplicates.
+    Tracks whether brief has been posted today to avoid duplicates.
     """
 
     def __init__(
@@ -411,71 +456,66 @@ class EmailReader:
 
     @property
     def _use_imap(self) -> bool:
-        """True when IMAP credentials are available -- preferred over OAuth2."""
         return bool(self._imap_address and self._imap_password)
 
     @property
     def is_configured(self) -> bool:
-        """True if any auth method is available."""
         return self._use_imap or Path(self._creds_path).exists()
 
-    # ---- IMAP fetch ----------------------------------------------------------
+    # ---- Fetch all senders ---------------------------------------------------
 
-    async def _fetch_imap(self, sender_email: str) -> str | None:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            partial(_imap_fetch_sync, self._imap_address, self._imap_password, sender_email),
-        )
-
-    # ---- OAuth2 fetch --------------------------------------------------------
-
-    async def _get_oauth2_service(self) -> Any:
-        if self._oauth2_service is not None:
-            return self._oauth2_service
-        loop = asyncio.get_event_loop()
-        svc  = await loop.run_in_executor(
-            None,
-            partial(_build_gmail_service, self._creds_path, self._token_path),
-        )
-        self._oauth2_service = svc
-        return svc
-
-    async def _fetch_oauth2(self, sender_email: str) -> str | None:
-        try:
-            svc  = await self._get_oauth2_service()
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                partial(_oauth2_fetch_sync, svc, sender_email),
-            )
-        except FileNotFoundError as exc:
-            log.warning("[gmail-oauth2] %s", exc)
-            return None
-        except Exception as exc:
-            log.warning("[gmail-oauth2] fetch failed: %s", exc)
-            self._oauth2_service = None   # reset so next attempt retries auth
-            return None
-
-    # ---- Public API ----------------------------------------------------------
-
-    async def fetch_newsletter(self, sender_email: str) -> str | None:
+    async def fetch_all_newsletters(self, senders: list[str]) -> dict[str, str]:
         """
-        Fetch today's newsletter from sender_email.
-        Uses IMAP when configured, otherwise falls back to OAuth2.
-        Returns body text or None.
+        Fetch today's newsletter from every sender in the list.
+        Returns {sender: body_text} for each one found (missing = not in dict).
+        Single IMAP connection for all senders.
         """
-        if not self.is_configured:
-            log.debug("[email] not configured -- no credentials found")
-            return None
+        if not self.is_configured or not senders:
+            return {}
 
         if self._use_imap:
             host, _ = _imap_server_for(self._imap_address)
-            log.debug("[email] using IMAP on %s for %s", host, self._imap_address)
-            return await self._fetch_imap(sender_email)
+            log.debug(
+                "[email] IMAP fetch for %d senders via %s (%s)",
+                len(senders), host, self._imap_address,
+            )
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                partial(_imap_fetch_all_sync, self._imap_address, self._imap_password, senders),
+            )
         else:
-            log.debug("[email] using OAuth2 (local fallback)")
-            return await self._fetch_oauth2(sender_email)
+            return await self._fetch_all_oauth2(senders)
+
+    async def _fetch_all_oauth2(self, senders: list[str]) -> dict[str, str]:
+        try:
+            if self._oauth2_service is None:
+                loop = asyncio.get_event_loop()
+                self._oauth2_service = await loop.run_in_executor(
+                    None,
+                    partial(_build_gmail_service, self._creds_path, self._token_path),
+                )
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                partial(_oauth2_fetch_all_sync, self._oauth2_service, senders),
+            )
+        except FileNotFoundError as exc:
+            log.warning("[gmail-oauth2] %s", exc)
+            return {}
+        except Exception as exc:
+            log.warning("[gmail-oauth2] fetch failed: %s", exc)
+            self._oauth2_service = None
+            return {}
+
+    # ---- Single-sender convenience (backward compat) -------------------------
+
+    async def fetch_newsletter(self, sender_email: str) -> str | None:
+        """Fetch a single sender. Returns body or None."""
+        results = await self.fetch_all_newsletters([sender_email])
+        return results.get(sender_email)
+
+    # ---- State ---------------------------------------------------------------
 
     def already_posted_today(self) -> bool:
         return self._posted_date == datetime.date.today().isoformat()
@@ -484,7 +524,7 @@ class EmailReader:
         self._posted_date = datetime.date.today().isoformat()
 
 
-# Backward-compatible alias so existing imports keep working
+# Backward-compatible alias
 GmailReader = EmailReader
 
 

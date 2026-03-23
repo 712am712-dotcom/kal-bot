@@ -1287,20 +1287,25 @@ async def _gmail_brief_task(
     model_override_fn=None,  # callable() → str | None
 ) -> None:
     """
-    Posts the Gmail morning brief once per day at 6:30am ET (11:30 UTC).
+    Posts the morning brief once per day at 6:30am ET (11:30 UTC).
     Polls every 10 minutes inside the 6:00–8:00am ET window to catch late arrivals.
-    Zero Claude calls if no newsletter found or already posted today.
+    Reads ALL senders in NEWSLETTER_EMAILS in one IMAP connection, synthesizes
+    into one brief with one Claude call. Zero calls if nothing found.
     """
-    sender = getattr(settings, "newsletter_email", "")
-    if not sender:
-        log.debug("[gmail_task] NEWSLETTER_EMAIL not set — skipping")
+    # Build sender list -- prefer NEWSLETTER_EMAILS (multi), fall back to NEWSLETTER_EMAIL
+    raw = getattr(settings, "newsletter_emails", "") or getattr(settings, "newsletter_email", "")
+    senders = [s.strip() for s in raw.split(",") if s.strip()]
+    if not senders:
+        log.debug("[brief_task] no newsletter senders configured -- skipping")
         return
+
+    log.info("[brief_task] watching %d sender(s): %s", len(senders), ", ".join(senders))
 
     while True:
         await asyncio.sleep(600)  # check every 10 minutes
 
         now_utc = datetime.datetime.utcnow()
-        # 6:00–8:00am ET ≈ 11:00–13:00 UTC
+        # 6:00–8:00am ET == 11:00–13:00 UTC
         if not (11 <= now_utc.hour < 13):
             continue
 
@@ -1311,17 +1316,18 @@ async def _gmail_brief_task(
             resp    = await kalshi._get("/markets", params={"status": "open", "limit": 100})
             markets = resp.get("markets", [])
         except Exception as exc:
-            log.warning("[gmail_task] failed to fetch markets: %s", exc)
+            log.warning("[brief_task] failed to fetch markets: %s", exc)
             markets = []
 
         try:
-            newsletter = await gmail.fetch_newsletter(sender)
-            if not newsletter:
-                log.debug("[gmail_task] no newsletter found yet")
+            newsletters = await gmail.fetch_all_newsletters(senders)
+            if not newsletters:
+                log.debug("[brief_task] no newsletters found yet (%d senders checked)", len(senders))
                 continue
 
+            log.info("[brief_task] %d newsletter(s) found: %s", len(newsletters), list(newsletters.keys()))
             model_ov = model_override_fn() if model_override_fn else None
-            brief, cost = await build_morning_brief(newsletter, markets, model_override=model_ov)
+            brief, cost = await build_morning_brief(newsletters, markets, model_override=model_ov)
 
             await discord.notify_morning_brief(brief)
 
@@ -1330,10 +1336,10 @@ async def _gmail_brief_task(
                 await discord.notify_todays_focus(focus)
 
             gmail.mark_posted()
-            log.info("[gmail_task] morning brief posted, cost=$%.4f", cost)
+            log.info("[brief_task] morning brief posted (%d sources), cost=$%.4f", len(newsletters), cost)
 
         except Exception as exc:
-            log.warning("[gmail_task] failed: %s", exc)
+            log.warning("[brief_task] failed: %s", exc)
 
 
 # ── Market Intelligence task ──────────────────────────────────────────────────

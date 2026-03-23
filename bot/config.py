@@ -63,7 +63,8 @@ class Settings(BaseSettings):
     # ── External APIs ─────────────────────────────────────────────────────────
     finnhub_api_key:       str = Field(default="", description="Finnhub free API key — finnhub.io")
     alpha_vantage_key:     str = Field(default="", description="Alpha Vantage free API key — alphavantage.co")
-    newsletter_email:      str = Field(default="", description="Gmail sender to read for morning brief")
+    newsletter_email:      str = Field(default="", description="[Legacy] Single newsletter sender — use NEWSLETTER_EMAILS instead")
+    newsletter_emails:     str = Field(default="", description="Comma-separated list of newsletter senders for morning brief")
     gmail_credentials_path: str = Field(default="./gmail_credentials.json", description="Path to Gmail OAuth2 credentials JSON")
     gmail_token_path:      str = Field(default="./gmail_token.json", description="Path to saved Gmail OAuth2 token")
     # Generic IMAP (primary -- works with Outlook, Gmail, Yahoo, any provider)
