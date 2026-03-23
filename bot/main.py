@@ -1287,10 +1287,10 @@ async def _gmail_brief_task(
     model_override_fn=None,  # callable() → str | None
 ) -> None:
     """
-    Posts the morning brief once per day at 6:30am ET (11:30 UTC).
-    Polls every 10 minutes inside the 6:00–8:00am ET window to catch late arrivals.
-    Reads ALL senders in NEWSLETTER_EMAILS in one IMAP connection, synthesizes
-    into one brief with one Claude call. Zero calls if nothing found.
+    Posts the morning brief once per day between 5:30–9:00am ET (10:30–14:00 UTC).
+    Checks every 10 minutes. Posts as soon as any newsletters are found.
+    At 9:00am ET the window closes -- whatever arrived by then is used.
+    Zero Claude calls if no newsletters arrive at all.
     """
     # Build sender list -- prefer NEWSLETTER_EMAILS (multi), fall back to NEWSLETTER_EMAIL
     raw = getattr(settings, "newsletter_emails", "") or getattr(settings, "newsletter_email", "")
@@ -1305,8 +1305,12 @@ async def _gmail_brief_task(
         await asyncio.sleep(600)  # check every 10 minutes
 
         now_utc = datetime.datetime.utcnow()
-        # 6:00–8:00am ET == 11:00–13:00 UTC
-        if not (11 <= now_utc.hour < 13):
+        # 5:30–9:00am ET == 10:30–14:00 UTC
+        in_window = (
+            (now_utc.hour == 10 and now_utc.minute >= 30)
+            or (11 <= now_utc.hour < 14)
+        )
+        if not in_window:
             continue
 
         if gmail.already_posted_today():
@@ -1321,8 +1325,16 @@ async def _gmail_brief_task(
 
         try:
             newsletters = await gmail.fetch_all_newsletters(senders)
+
+            # Before the 9am deadline: wait for at least one newsletter to arrive.
+            # At/after 8:50am ET (13:50 UTC): post with whatever we have.
+            at_deadline = now_utc.hour == 13 and now_utc.minute >= 50
             if not newsletters:
-                log.debug("[brief_task] no newsletters found yet (%d senders checked)", len(senders))
+                if at_deadline:
+                    log.info("[brief_task] 9am deadline reached with no newsletters -- skipping today")
+                    gmail.mark_posted()  # prevent further checks today
+                else:
+                    log.debug("[brief_task] no newsletters found yet (%d senders checked)", len(senders))
                 continue
 
             log.info("[brief_task] %d newsletter(s) found: %s", len(newsletters), list(newsletters.keys()))
