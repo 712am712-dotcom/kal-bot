@@ -134,8 +134,10 @@ async def audit_channel(
         author_id = int(msg.get("author", {}).get("id", 0))
         is_bot    = (author_id == bot_id)
 
-        reasons = _flag_reasons(content)
-        if msg["id"] in dupe_ids:
+        # Guide cards contain words like "Error" intentionally — never flag them
+        is_guide = content.startswith("**Kal —")
+        reasons = [] if is_guide else _flag_reasons(content)
+        if not is_guide and msg["id"] in dupe_ids:
             reasons.append("duplicate within 10 min")
 
         if reasons:
