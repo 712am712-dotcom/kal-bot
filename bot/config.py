@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     newsletter_email:      str = Field(default="", description="Gmail sender to read for morning brief")
     gmail_credentials_path: str = Field(default="./gmail_credentials.json", description="Path to Gmail OAuth2 credentials JSON")
     gmail_token_path:      str = Field(default="./gmail_token.json", description="Path to saved Gmail OAuth2 token")
+    kal_gmail_address:     str = Field(default="", description="Kal's dedicated Gmail address for IMAP/App Password auth")
+    kal_gmail_app_password: str = Field(default="", description="Gmail App Password for headless IMAP access (no OAuth2)")
 
     # ── Volume Floor ──────────────────────────────────────────────────────────
     volume_floor: float = Field(default=150.0, description="Skip markets below this dollar volume before calling Claude")

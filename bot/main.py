@@ -1455,6 +1455,8 @@ async def main_async() -> None:
     gmail_reader  = GmailReader(
         credentials_path=getattr(settings, "gmail_credentials_path", "./gmail_credentials.json"),
         token_path=getattr(settings, "gmail_token_path", "./gmail_token.json"),
+        imap_address=getattr(settings, "kal_gmail_address", ""),
+        imap_password=getattr(settings, "kal_gmail_app_password", ""),
     )
     # Callable that returns the override model when daily limit is hit
     def _model_override_fn() -> str | None:
