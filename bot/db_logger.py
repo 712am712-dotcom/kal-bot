@@ -19,6 +19,13 @@ log = structlog.get_logger(__name__)
 
 class DBLogger:
     def __init__(self) -> None:
+        # DEBUG — print first 20 chars of each credential so Railway logs show
+        # exactly what value was loaded from env vars. Remove after confirming.
+        url_preview = (settings.supabase_url or "")[:20]
+        key_preview = (settings.supabase_service_role_key or "")[:20]
+        key_len     = len(settings.supabase_service_role_key or "")
+        print(f"[DEBUG] SUPABASE_URL      prefix: {url_preview!r}  (len={len(settings.supabase_url or '')})")
+        print(f"[DEBUG] SUPABASE_KEY      prefix: {key_preview!r}  (len={key_len})")
         self._client: Client = create_client(
             settings.supabase_url,
             settings.supabase_service_role_key,
