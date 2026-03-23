@@ -24,6 +24,22 @@ from pathlib import Path
 # any of these strings.
 
 GUIDE_FINGERPRINTS = [
+    "**Kal — #morning-brief**",
+    "**Kal — #breaking-news**",
+    "**Kal — #big-money**",
+    "**Kal — #thesis**",
+    "**Kal — #trades**",
+    "**Kal — #watchlist**",
+    "**Kal — #weekly-analysis**",
+    "**Kal — #crypto**",
+    "**Kal — #stocks**",
+    "**Kal — #prediction-markets**",
+    "**Kal — #commodities**",
+    "**Kal — #high-conviction**",
+    "**Kal — #intelligence-feed**",
+    "**Kal — #summary**",
+    "**Kal — #alerts**",
+    # Legacy fingerprints — match old guides so they get cleaned up
     "**Kal — Trades Channel Guide**",
     "**Kal — Analysis Channel Guide**",
     "**Kal — Summary Channel Guide**",
@@ -43,13 +59,29 @@ OLD_SUMMARY_FINGERPRINTS = [
 ]
 
 CHANNELS_TO_CLEAN = [
-    "trades",
-    "analysis",
-    "summary",
-    "intelligence",
-    "alerts",
+    # 🧠 INTELLIGENCE
     "morning-brief",
+    "breaking-news",
+    "big-money",
+    "thesis",
+    # 📊 MARKETS
+    "trades",
+    "watchlist",
     "weekly-analysis",
+    # 📈 ASSET CLASSES
+    "crypto",
+    "stocks",
+    "prediction-markets",
+    "commodities",
+    # 🚨 SIGNALS
+    "high-conviction",
+    "intelligence-feed",
+    # ⚙️ SYSTEM
+    "summary",
+    "alerts",
+    # Legacy channels — clean these out before deleting them
+    "analysis",
+    "intelligence",
 ]
 
 

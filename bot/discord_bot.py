@@ -26,10 +26,18 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-BASE_URL     = "https://discord.com/api/v10"
-CATEGORY_NAME = "Kal"
-# Desired channel order within the category
-CHANNEL_ORDER = ["trades", "analysis", "summary", "alerts", "intelligence", "morning-brief", "weekly-analysis"]
+BASE_URL = "https://discord.com/api/v10"
+
+# 5-category structure — each tuple is (category_name, [channel_names_in_order])
+CATEGORIES = [
+    ("🧠 INTELLIGENCE",  ["morning-brief", "breaking-news", "big-money", "thesis"]),
+    ("📊 MARKETS",        ["trades", "watchlist", "weekly-analysis"]),
+    ("📈 ASSET CLASSES",  ["crypto", "stocks", "prediction-markets", "commodities"]),
+    ("🚨 SIGNALS",        ["high-conviction", "intelligence-feed"]),
+    ("⚙️ SYSTEM",         ["summary", "alerts"]),
+]
+# Flat list of all channel names (for backward-compat references)
+CHANNEL_ORDER = [ch for _, chs in CATEGORIES for ch in chs]
 
 
 # ── Avatar generation ─────────────────────────────────────────────────────────
@@ -323,47 +331,51 @@ class DiscordBot:
         """
         guild_id = await self.get_guild_id()
         bot_id   = await self.get_bot_id()
-        cat_id   = await self._find_or_create_category(guild_id, CATEGORY_NAME)
 
         channel_ids: dict[str, int] = {}
+        position = 0  # global position counter across all categories
 
-        for position, ch_name in enumerate(CHANNEL_ORDER):
-            ch_id = await self._find_or_create_channel(guild_id, ch_name, cat_id, position)
-            channel_ids[ch_name] = ch_id
+        for cat_name, cat_channels in CATEGORIES:
+            cat_id = await self._find_or_create_category(guild_id, cat_name)
 
-            guide_text = guides.get(ch_name)
-            if not guide_text:
-                continue
+            for ch_name in cat_channels:
+                ch_id = await self._find_or_create_channel(guild_id, ch_name, cat_id, position)
+                channel_ids[ch_name] = ch_id
+                position += 1
 
-            # Use first 80 chars as fingerprint — unique enough, stable across restarts
-            fingerprint = guide_text[:80]
+                guide_text = guides.get(ch_name)
+                if not guide_text:
+                    continue
 
-            existing_id = await self._guide_already_posted(ch_id, bot_id, fingerprint)
-            if existing_id is not None:
-                log.info("[discord_bot] guide already present in #%s — skipping", ch_name)
-                continue
+                # Use first 80 chars as fingerprint — unique enough, stable across restarts
+                fingerprint = guide_text[:80]
 
-            # No guide found — post it once
-            msg_id: int | None = None
-            try:
-                await asyncio.sleep(0.3)
-                msg_id = await self.send(ch_id, {"content": guide_text})
-                log.info("[discord_bot] guide posted in #%s", ch_name)
-            except Exception as exc:
-                log.warning("[discord_bot] failed to post guide in #%s: %s", ch_name, exc)
+                existing_id = await self._guide_already_posted(ch_id, bot_id, fingerprint)
+                if existing_id is not None:
+                    log.info("[discord_bot] guide already present in #%s — skipping", ch_name)
+                    continue
 
-            # Pin it (best-effort — permission failure logged silently, never posted)
-            if msg_id:
-                await asyncio.sleep(0.6)
+                # No guide found — post it once
+                msg_id: int | None = None
                 try:
-                    await self.pin(ch_id, msg_id)
-                    log.info("[discord_bot] guide pinned in #%s", ch_name)
+                    await asyncio.sleep(0.3)
+                    msg_id = await self.send(ch_id, {"content": guide_text})
+                    log.info("[discord_bot] guide posted in #%s", ch_name)
                 except Exception as exc:
-                    log.warning(
-                        "[discord_bot] pin failed in #%s (grant Manage Messages to bot role): %s",
-                        ch_name, exc,
-                    )
-                await asyncio.sleep(0.6)
+                    log.warning("[discord_bot] failed to post guide in #%s: %s", ch_name, exc)
+
+                # Pin it (best-effort — permission failure logged silently, never posted)
+                if msg_id:
+                    await asyncio.sleep(0.6)
+                    try:
+                        await self.pin(ch_id, msg_id)
+                        log.info("[discord_bot] guide pinned in #%s", ch_name)
+                    except Exception as exc:
+                        log.warning(
+                            "[discord_bot] pin failed in #%s (grant Manage Messages to bot role): %s",
+                            ch_name, exc,
+                        )
+                    await asyncio.sleep(0.6)
 
         self._channel_ids = channel_ids
         return channel_ids

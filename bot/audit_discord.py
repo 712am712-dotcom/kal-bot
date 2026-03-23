@@ -32,13 +32,26 @@ FLAG_PATTERNS = [
 ]
 
 CHANNELS = [
+    # 🧠 INTELLIGENCE
+    "morning-brief",
+    "breaking-news",
+    "big-money",
+    "thesis",
+    # 📊 MARKETS
     "trades",
-    "analysis",
+    "watchlist",
+    "weekly-analysis",
+    # 📈 ASSET CLASSES
+    "crypto",
+    "stocks",
+    "prediction-markets",
+    "commodities",
+    # 🚨 SIGNALS
+    "high-conviction",
+    "intelligence-feed",
+    # ⚙️ SYSTEM
     "summary",
     "alerts",
-    "intelligence",
-    "morning-brief",
-    "weekly-analysis",
 ]
 
 DUPLICATE_WINDOW_SECS = 600  # 10 minutes
