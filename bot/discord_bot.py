@@ -28,14 +28,20 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://discord.com/api/v10"
 
-# 5-category structure — each tuple is (category_name, [channel_names_in_order])
+# 7-category structure — each tuple is (category_name, [channel_names_in_order])
+# private=True channels are created with @everyone view permission denied.
 CATEGORIES = [
     ("🧠 INTELLIGENCE",  ["morning-brief", "breaking-news", "big-money", "thesis"]),
+    ("📅 CALENDAR",       ["economic-calendar"]),
+    ("🔄 DAILY ROUTINE",  ["market-open", "market-close", "ideas"]),
     ("📊 MARKETS",        ["trades", "watchlist", "weekly-analysis"]),
     ("📈 ASSET CLASSES",  ["crypto", "stocks", "prediction-markets", "commodities"]),
     ("🚨 SIGNALS",        ["high-conviction", "intelligence-feed"]),
     ("⚙️ SYSTEM",         ["summary", "alerts"]),
 ]
+# Channels that should be private (deny @everyone view)
+PRIVATE_CHANNELS = {"ideas"}
+
 # Flat list of all channel names (for backward-compat references)
 CHANNEL_ORDER = [ch for _, chs in CATEGORIES for ch in chs]
 
@@ -262,19 +268,29 @@ class DiscordBot:
         return int(result["id"])
 
     async def _find_or_create_channel(
-        self, guild_id: int, name: str, category_id: int, position: int
+        self, guild_id: int, name: str, category_id: int, position: int,
+        private: bool = False,
     ) -> int:
         for ch in await self._list_channels(guild_id):
             if ch["type"] == 0 and ch["name"].lower() == name.lower():
                 log.info("[discord_bot] channel #%s already exists (%s)", name, ch["id"])
                 return int(ch["id"])
-        result = await self._post(f"/guilds/{guild_id}/channels", {
+        payload: dict = {
             "name":      name,
             "type":      0,               # text channel
             "parent_id": str(category_id),
             "position":  position,
-        })
-        log.info("[discord_bot] created channel #%s (%s)", name, result["id"])
+        }
+        if private:
+            # Deny @everyone the VIEW_CHANNEL permission (bit 0x400 = 1024)
+            payload["permission_overwrites"] = [{
+                "id":    str(guild_id),   # @everyone role has same id as guild
+                "type":  0,               # 0 = role
+                "allow": "0",
+                "deny":  "1024",          # VIEW_CHANNEL
+            }]
+        result = await self._post(f"/guilds/{guild_id}/channels", payload)
+        log.info("[discord_bot] created channel #%s (private=%s) (%s)", name, private, result["id"])
         await asyncio.sleep(0.5)
         return int(result["id"])
 
@@ -355,7 +371,10 @@ class DiscordBot:
             cat_id = await self._find_or_create_category(guild_id, cat_name)
 
             for ch_name in cat_channels:
-                ch_id = await self._find_or_create_channel(guild_id, ch_name, cat_id, position)
+                ch_id = await self._find_or_create_channel(
+                    guild_id, ch_name, cat_id, position,
+                    private=(ch_name in PRIVATE_CHANNELS),
+                )
                 channel_ids[ch_name] = ch_id
                 position += 1
 

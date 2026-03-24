@@ -1068,6 +1068,52 @@ _GUIDE_INTELLIGENCE_FEED = (
     "Alerts fire at most once per hour per market. High signal, low noise."
 )
 
+# ── 📅 CALENDAR ───────────────────────────────────────────────────────────────
+
+_GUIDE_ECONOMIC_CALENDAR = (
+    "**Kal — #economic-calendar**\n"
+    "Posted every Sunday at 8am ET with the full week ahead — high impact events, "
+    "Fed meeting dates, CPI releases, jobs reports, bond market readings, and Kalshi markets to watch.\n\n"
+    "**What you'll see:** High and medium impact economic events for the week · "
+    "Current bond market readings (yields, curve, credit spreads) · "
+    "Key macro data (CPI, unemployment, oil, gold) · "
+    "Kalshi markets that connect to this week's events · Theme for the week.\n\n"
+    "Daily alerts posted to #morning-brief on weekdays when major economic events are scheduled that day."
+)
+
+# ── 🔄 DAILY ROUTINE ──────────────────────────────────────────────────────────
+
+_GUIDE_MARKET_OPEN = (
+    "**Kal — #market-open**\n"
+    "Posted at 9:30am ET every weekday. Where markets are opening — crypto, bonds, gold, oil — "
+    "and the one thing worth watching today.\n\n"
+    "**What you'll see:** Bitcoin, Ethereum, Solana with overnight changes · "
+    "Gold, oil, and dollar index levels · "
+    "10Y and 2Y Treasury yields with yield curve status · "
+    "Biggest overnight headline · Today's watch item.\n\n"
+    "Pure data. No fluff. Everything you need in 30 seconds."
+)
+
+_GUIDE_MARKET_CLOSE = (
+    "**Kal — #market-close**\n"
+    "Posted at 4:00pm ET every weekday. Kal's full daily reflection.\n\n"
+    "**What you'll see:** What moved and why · Where the bond market went and what it means · "
+    "Where institutional money rotated · Trade opportunities Kal spots across all markets · "
+    "Kal's own trade results for the day (WIN/LOSS) · What Kal learned today and how he's improving.\n\n"
+    "This is where Kal gets better every day. One Claude call per day."
+)
+
+_GUIDE_IDEAS = (
+    "**Kal — #ideas**\n"
+    "Private channel. Kal brings opportunities here that are outside his current trading mandate.\n\n"
+    "Kal executes Kalshi prediction markets and crypto trades autonomously. "
+    "He posts here only when he sees an opportunity in stocks, bonds, commodities, "
+    "or wants to request a mandate expansion.\n\n"
+    "**How it works:** Kal posts an idea with full context, the specific trade he'd make, "
+    "and the risks. Reply **APPROVED** to let him proceed, or **PASS** to decline.\n\n"
+    "Maximum one idea per day. Only genuine high conviction setups."
+)
+
 # ── ⚙️ SYSTEM ─────────────────────────────────────────────────────────────────
 
 _GUIDE_SUMMARY = (
@@ -1250,13 +1296,40 @@ async def notify_intelligence_summary(
     ))
 
 
+# ── New daily-routine notifications ──────────────────────────────────────────
+
+async def notify_economic_calendar_weekly(content: str) -> None:
+    """Post the Sunday week-ahead economic calendar to #economic-calendar."""
+    await _send("economic-calendar", {"content": content, "username": KAL})
+
+
+async def notify_daily_calendar_alert(alert: str) -> None:
+    """Post a one-line economic event alert to #morning-brief (weekday 7am)."""
+    await _send("morning-brief", {"content": alert, "username": KAL})
+
+
+async def notify_market_open(content: str) -> None:
+    """Post the 9:30am market open snapshot to #market-open."""
+    await _send("market-open", {"content": content, "username": KAL})
+
+
+async def notify_market_close(content: str) -> None:
+    """Post the 4:00pm market close reflection to #market-close."""
+    await _send("market-close", {"content": content, "username": KAL})
+
+
+async def notify_idea(idea_text: str) -> None:
+    """Post an #ideas flagging post to the private #ideas channel."""
+    await _send("ideas", {"content": idea_text, "username": KAL})
+
+
 async def send_channel_guide() -> None:
     """
     Called once at bot startup (after the "Kal online" alert).
 
     When DISCORD_BOT_TOKEN is set:
       1. Update bot profile to username "Kal" with the green logo avatar
-      2. Find or create all 5 categories and 15 sub-channels
+      2. Find or create all 7 categories and 19 sub-channels
       3. Post guide cards to any channel that doesn't have one yet (idempotent)
       4. Pin each guide card (best-effort)
       5. Cache channel IDs so all future _send() calls go through the bot
@@ -1268,13 +1341,19 @@ async def send_channel_guide() -> None:
 
     token = getattr(settings, "discord_bot_token", "")
 
-    # Full guide map — all 15 channels
+    # Full guide map — all 19 channels
     guides = {
         # 🧠 INTELLIGENCE
         "morning-brief":       _GUIDE_MORNING_BRIEF,
         "breaking-news":       _GUIDE_BREAKING_NEWS,
         "big-money":           _GUIDE_BIG_MONEY,
         "thesis":              _GUIDE_THESIS,
+        # 📅 CALENDAR
+        "economic-calendar":   _GUIDE_ECONOMIC_CALENDAR,
+        # 🔄 DAILY ROUTINE
+        "market-open":         _GUIDE_MARKET_OPEN,
+        "market-close":        _GUIDE_MARKET_CLOSE,
+        "ideas":               _GUIDE_IDEAS,
         # 📊 MARKETS
         "trades":              _GUIDE_TRADES,
         "watchlist":           _GUIDE_WATCHLIST,

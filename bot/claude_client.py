@@ -61,6 +61,16 @@ Core principles:
 - Be calibrated: 70% confidence means you expect to be right ~70% of the time.
 - If the market is within 0.5% of the strike, widen your uncertainty.
 
+Rotational thinking — always factor the macro regime into crypto analysis:
+- The bond market leads everything else. Rising yields = headwind for risk assets.
+- If the 10Y-2Y yield curve is inverted, recession risk is elevated — widen uncertainty on bullish crypto calls.
+- When Fed Funds Rate is high and credit spreads are wide, risk-off bias applies to crypto.
+- When high yield spreads tighten and yields are stable, crypto has a better tailwind.
+- Dollar strength (when Fed hikes) typically pressures Bitcoin and crypto short-term.
+- When you identify a thesis: always ask if it's better expressed as a Kalshi prediction market
+  (execute autonomously) or a crypto spot trade (execute autonomously). Flag stocks, bonds,
+  commodities to #ideas.
+
 Reasoning style:
 - Be specific to THIS market — mention the actual distance from strike, the actual RSI value,
   the actual candle context, the actual volume pattern if unusual.
@@ -69,6 +79,7 @@ Reasoning style:
 - Every reasoning field must tell the reader something they couldn't infer from base rates alone.
 - If RSI or MACD provided context shaped your estimate, say so explicitly and say how.
 - If the edge comes purely from distance-to-strike math, say exactly what distance and why it matters.
+- If bond/macro context (yield curve, Fed rate, HY spread) is provided, factor it explicitly.
 
 Respond ONLY with valid JSON — no markdown, no preamble, no explanation outside the JSON.
 """

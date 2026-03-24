@@ -1,16 +1,17 @@
 """
-restructure_discord.py — One-time Discord server migration script.
+restructure_discord.py -- One-time Discord server migration script.
 
 What this does:
-  1. Creates all 5 new categories and 15 channels (idempotent — skips existing)
-  2. Posts pinned guide cards to each new channel
-  3. Deletes the old #analysis and #intelligence channels
+  1. Creates all 7 categories and 19 channels (idempotent -- skips existing)
+  2. Posts and pins guide cards to each new channel
+  3. Makes #ideas private (deny @everyone VIEW_CHANNEL)
+  4. Deletes the old #analysis and #intelligence channels
 
-Run ONCE after updating discord_notifier.py and discord_bot.py:
+Run once after updating discord_notifier.py and discord_bot.py:
   cd C:\\Users\\andre\\Desktop\\kalshi-bot\\bot
   python restructure_discord.py
 
-Safe to re-run — channel creation and guide posting are both idempotent.
+Safe to re-run -- channel creation and guide posting are both idempotent.
 
 Rate-limit behaviour:
   - 2s delay after every API call
@@ -28,25 +29,20 @@ import httpx
 
 OLD_CHANNELS_TO_DELETE = ["analysis", "intelligence"]
 
-# ── Timing constants ──────────────────────────────────────────────────────────
-DELAY_AFTER_CALL     = 2   # seconds between every API call
-DELAY_AFTER_CHANNEL  = 5   # extra seconds after creating/checking a channel
-DELAY_AFTER_CATEGORY = 10  # extra seconds after finishing a whole category
-DELAY_ON_429         = 30  # minimum seconds to wait on a rate-limit response
+# Timing constants
+DELAY_AFTER_CALL     = 2
+DELAY_AFTER_CHANNEL  = 5
+DELAY_AFTER_CATEGORY = 10
+DELAY_ON_429         = 30
 
 
 def _ts() -> str:
-    """Current time as HH:MM:SS for progress lines."""
     return time.strftime("%H:%M:%S")
 
 
-# ── 429-aware HTTP wrapper ────────────────────────────────────────────────────
+# 429-aware HTTP wrapper
 
 async def _api(bot, method: str, path: str, **kwargs) -> httpx.Response:
-    """
-    Call bot._request() with automatic 429 retry and verbose output.
-    Prints the rate-limit wait so you can see it's not frozen.
-    """
     from discord_bot import BASE_URL
     for attempt in range(5):
         async with httpx.AsyncClient(timeout=20.0) as c:
@@ -57,11 +53,10 @@ async def _api(bot, method: str, path: str, **kwargs) -> httpx.Response:
         if r.status_code == 429:
             retry_after = float(r.headers.get("retry-after", DELAY_ON_429))
             wait = max(retry_after, DELAY_ON_429)
-            print(f"  [{_ts()}] 429 rate limit — waiting {wait:.0f}s before retry {attempt+1}/4 ...")
+            print(f"  [{_ts()}] 429 rate limit -- waiting {wait:.0f}s before retry {attempt+1}/4 ...")
             await asyncio.sleep(wait)
             continue
         return r
-    # Last attempt with raise_for_status
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.request(method, f"{BASE_URL}{path}", headers=bot._headers, **kwargs)
     r.raise_for_status()
@@ -74,7 +69,7 @@ async def _sleep(secs: float, label: str = "") -> None:
     await asyncio.sleep(secs)
 
 
-# ── Core operations with progress output ─────────────────────────────────────
+# Core operations
 
 async def find_or_create_category(bot, guild_id: int, name: str) -> int:
     print(f"  [{_ts()}] Category: {name}")
@@ -96,9 +91,10 @@ async def find_or_create_category(bot, guild_id: int, name: str) -> int:
 
 
 async def find_or_create_channel(
-    bot, guild_id: int, name: str, category_id: int, position: int
+    bot, guild_id: int, name: str, category_id: int, position: int,
+    private: bool = False,
 ) -> int:
-    print(f"    [{_ts()}] Channel: #{name}")
+    print(f"    [{_ts()}] Channel: #{name}{' [PRIVATE]' if private else ''}")
     r = await _api(bot, "GET", f"/guilds/{guild_id}/channels")
     r.raise_for_status()
     await _sleep(DELAY_AFTER_CALL)
@@ -108,12 +104,21 @@ async def find_or_create_channel(
             print(f"             -> already exists (id={ch['id']})")
             return int(ch["id"])
 
-    r2 = await _api(bot, "POST", f"/guilds/{guild_id}/channels", json={
+    payload: dict = {
         "name":      name,
         "type":      0,
         "parent_id": str(category_id),
         "position":  position,
-    })
+    }
+    if private:
+        payload["permission_overwrites"] = [{
+            "id":    str(guild_id),
+            "type":  0,
+            "allow": "0",
+            "deny":  "1024",   # VIEW_CHANNEL bit
+        }]
+
+    r2 = await _api(bot, "POST", f"/guilds/{guild_id}/channels", json=payload)
     r2.raise_for_status()
     ch_id = int(r2.json()["id"])
     print(f"             -> created (id={ch_id})")
@@ -122,7 +127,6 @@ async def find_or_create_channel(
 
 
 async def post_and_pin_guide(bot, bot_id: int, ch_id: int, ch_name: str, guide: str) -> None:
-    # Check if guide already posted (fingerprint = first 80 chars)
     fingerprint = guide[:80]
     print(f"    [{_ts()}] Guide for #{ch_name}: checking...")
     r = await _api(bot, "GET", f"/channels/{ch_id}/messages", params={"limit": 50})
@@ -135,7 +139,6 @@ async def post_and_pin_guide(bot, bot_id: int, ch_id: int, ch_name: str, guide: 
                     print(f"             -> guide already pinned, skipping")
                     return
 
-    # Post guide
     r2 = await _api(bot, "POST", f"/channels/{ch_id}/messages", json={"content": guide})
     if r2.status_code not in (200, 201):
         print(f"             -> [!!] post failed: {r2.status_code} {r2.text[:80]}")
@@ -144,7 +147,6 @@ async def post_and_pin_guide(bot, bot_id: int, ch_id: int, ch_name: str, guide: 
     print(f"             -> posted (msg_id={msg_id})")
     await _sleep(DELAY_AFTER_CALL)
 
-    # Pin it
     r3 = await _api(bot, "PUT", f"/channels/{ch_id}/pins/{msg_id}")
     if r3.status_code in (200, 204):
         print(f"             -> pinned")
@@ -177,12 +179,13 @@ async def delete_channel(bot, guild_id: int, name: str) -> None:
     await _sleep(DELAY_AFTER_CALL)
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 
 async def main() -> None:
-    from discord_bot import CATEGORIES, DiscordBot, make_kal_avatar
+    from discord_bot import CATEGORIES, PRIVATE_CHANNELS, DiscordBot, make_kal_avatar
     from discord_notifier import (
         _GUIDE_MORNING_BRIEF, _GUIDE_BREAKING_NEWS, _GUIDE_BIG_MONEY, _GUIDE_THESIS,
+        _GUIDE_ECONOMIC_CALENDAR, _GUIDE_MARKET_OPEN, _GUIDE_MARKET_CLOSE, _GUIDE_IDEAS,
         _GUIDE_TRADES, _GUIDE_WATCHLIST, _GUIDE_WEEKLY,
         _GUIDE_CRYPTO, _GUIDE_STOCKS, _GUIDE_PREDICTION_MARKETS, _GUIDE_COMMODITIES,
         _GUIDE_HIGH_CONVICTION, _GUIDE_INTELLIGENCE_FEED,
@@ -190,22 +193,36 @@ async def main() -> None:
     )
 
     guides = {
+        # INTELLIGENCE
         "morning-brief":      _GUIDE_MORNING_BRIEF,
         "breaking-news":      _GUIDE_BREAKING_NEWS,
         "big-money":          _GUIDE_BIG_MONEY,
         "thesis":             _GUIDE_THESIS,
+        # CALENDAR
+        "economic-calendar":  _GUIDE_ECONOMIC_CALENDAR,
+        # DAILY ROUTINE
+        "market-open":        _GUIDE_MARKET_OPEN,
+        "market-close":       _GUIDE_MARKET_CLOSE,
+        "ideas":              _GUIDE_IDEAS,
+        # MARKETS
         "trades":             _GUIDE_TRADES,
         "watchlist":          _GUIDE_WATCHLIST,
         "weekly-analysis":    _GUIDE_WEEKLY,
+        # ASSET CLASSES
         "crypto":             _GUIDE_CRYPTO,
         "stocks":             _GUIDE_STOCKS,
         "prediction-markets": _GUIDE_PREDICTION_MARKETS,
         "commodities":        _GUIDE_COMMODITIES,
+        # SIGNALS
         "high-conviction":    _GUIDE_HIGH_CONVICTION,
         "intelligence-feed":  _GUIDE_INTELLIGENCE_FEED,
+        # SYSTEM
         "summary":            _GUIDE_SUMMARY,
         "alerts":             _GUIDE_ALERTS,
     }
+
+    n_cats = len(CATEGORIES)
+    n_chs  = sum(len(chs) for _, chs in CATEGORIES)
 
     print()
     print("=" * 64)
@@ -226,7 +243,6 @@ async def main() -> None:
 
     bot = DiscordBot(token)
 
-    # Identity
     try:
         guild_id = await bot.get_guild_id()
         bot_id   = await bot.get_bot_id()
@@ -236,9 +252,9 @@ async def main() -> None:
         print(f"[!!] Cannot connect: {exc}")
         sys.exit(1)
 
-    # ── Step 1: Update bot profile ─────────────────────────────────────────────
+    # Step 1: Update bot profile
     print()
-    print(f"[{_ts()}] Step 1 — Updating bot profile...")
+    print(f"[{_ts()}] Step 1 -- Updating bot profile...")
     try:
         avatar = make_kal_avatar()
         await bot.update_profile("Kal", avatar)
@@ -247,17 +263,17 @@ async def main() -> None:
     except Exception as exc:
         print(f"[warn] Profile update failed (non-fatal): {exc}")
 
-    # ── Step 2: Create categories + channels ──────────────────────────────────
+    # Step 2: Create categories + channels
     print()
-    print(f"[{_ts()}] Step 2 — Creating 5 categories and 15 channels...")
-    print(f"         (2s/call · 5s/channel · 10s/category · 30s on 429)")
+    print(f"[{_ts()}] Step 2 -- Creating {n_cats} categories and {n_chs} channels...")
+    print(f"         (2s/call, 5s/channel, 10s/category, 30s on 429)")
     print()
 
     channel_ids: dict[str, int] = {}
     position = 0
 
     for cat_idx, (cat_name, cat_channels) in enumerate(CATEGORIES):
-        print(f"  -- Category {cat_idx+1}/5 -----------------------------")
+        print(f"  -- Category {cat_idx+1}/{n_cats}: {cat_name} --")
         try:
             cat_id = await find_or_create_category(bot, guild_id, cat_name)
         except Exception as exc:
@@ -267,15 +283,18 @@ async def main() -> None:
         await _sleep(DELAY_AFTER_CALL)
 
         for ch_name in cat_channels:
+            is_private = ch_name in PRIVATE_CHANNELS
             try:
-                ch_id = await find_or_create_channel(bot, guild_id, ch_name, cat_id, position)
+                ch_id = await find_or_create_channel(
+                    bot, guild_id, ch_name, cat_id, position,
+                    private=is_private,
+                )
                 channel_ids[ch_name] = ch_id
                 position += 1
             except Exception as exc:
                 print(f"    [!!] Failed to create #{ch_name}: {exc}")
                 continue
 
-            # Post + pin guide card
             guide = guides.get(ch_name)
             if guide:
                 try:
@@ -285,12 +304,12 @@ async def main() -> None:
 
             await _sleep(DELAY_AFTER_CHANNEL, f"(after #{ch_name})")
 
-        if cat_idx < len(CATEGORIES) - 1:
+        if cat_idx < n_cats - 1:
             await _sleep(DELAY_AFTER_CATEGORY, f"(after {cat_name})")
 
-    # ── Step 3: Delete old channels ────────────────────────────────────────────
+    # Step 3: Delete old channels
     print()
-    print(f"[{_ts()}] Step 3 — Deleting old channels...")
+    print(f"[{_ts()}] Step 3 -- Deleting old channels...")
     for ch_name in OLD_CHANNELS_TO_DELETE:
         try:
             await delete_channel(bot, guild_id, ch_name)
@@ -298,22 +317,21 @@ async def main() -> None:
             print(f"  [!!] Could not delete #{ch_name}: {exc}")
         await _sleep(DELAY_AFTER_CALL)
 
-    # ── Done ──────────────────────────────────────────────────────────────────
+    # Done
     print()
     print("=" * 64)
-    print(f"  RESTRUCTURE COMPLETE — {_ts()}")
+    print(f"  RESTRUCTURE COMPLETE -- {_ts()}")
     print()
-    print(f"  {len(channel_ids)}/15 channels ready")
+    print(f"  {len(channel_ids)}/{n_chs} channels ready")
     print()
     print("  New structure:")
-    print("    [INTELLIGENCE]  #morning-brief #breaking-news #big-money #thesis")
-    print("    [MARKETS]       #trades #watchlist #weekly-analysis")
-    print("    [ASSET CLASSES] #crypto #stocks #prediction-markets #commodities")
-    print("    [SIGNALS]       #high-conviction #intelligence-feed")
-    print("    [SYSTEM]        #summary #alerts")
+    for cat_name, cat_channels in CATEGORIES:
+        ch_list = " ".join(f"#{c}" for c in cat_channels)
+        # Strip emoji for safe ASCII output
+        cat_label = cat_name.encode("ascii", "ignore").decode().strip()
+        print(f"    [{cat_label or cat_name}] {ch_list}")
     print()
-    print("  Next: restart the bot to route to the new channels:")
-    print("    python main.py --paper")
+    print("  Next: restart the bot -- python main.py --paper")
     print("=" * 64)
     print()
 

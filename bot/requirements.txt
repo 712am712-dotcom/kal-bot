@@ -14,6 +14,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 pandas-ta>=0.3.14b
 finnhub-python>=2.4.18
+# FRED client uses httpx (already listed above) — no additional package needed
 google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
 google-api-python-client>=2.0.0

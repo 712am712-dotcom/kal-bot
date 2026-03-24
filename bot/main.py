@@ -46,6 +46,18 @@ from email_reader import EmailReader as GmailReader, build_morning_brief, extrac
 from technical_analysis import TechnicalAnalyzer
 from performance_tracker import PerformanceTracker
 import journal as journal_mod
+from economic_calendar import (
+    post_weekly_calendar, get_daily_calendar_alert,
+    weekly_already_posted, mark_weekly_posted,
+    daily_alert_already_posted, mark_daily_alert_posted,
+    _is_sunday_8am_et, _is_weekday_7am_et,
+)
+from market_snapshot import (
+    build_market_open, build_market_close,
+    market_open_already_posted, mark_open_posted,
+    market_close_already_posted, mark_close_posted,
+)
+from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_posted_today
 
 log = structlog.get_logger(__name__)
 
@@ -1426,6 +1438,133 @@ async def _credit_check_task() -> None:
                 log.warning("credit_check_probe_failed", error=str(exc))
 
 
+# ── Economic calendar task ────────────────────────────────────────────────────
+
+async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
+    """
+    Two jobs:
+      - Sunday 8am ET (13:00 UTC): post week-ahead calendar to #economic-calendar
+      - Weekday 7am ET (12:00 UTC): post daily alert to #morning-brief if HIGH events today
+    Checks every 5 minutes. Zero Claude calls.
+    """
+    fred_key     = getattr(settings, "fred_api_key", "")
+    finnhub_key  = getattr(settings, "finnhub_api_key", "")
+
+    while True:
+        await asyncio.sleep(300)  # check every 5 minutes
+        try:
+            # ── Sunday weekly calendar ────────────────────────────────────────
+            if _is_sunday_8am_et() and not weekly_already_posted():
+                try:
+                    resp    = await kalshi._get("/markets", params={"status": "open", "limit": 100})
+                    markets = resp.get("markets", [])
+                except Exception:
+                    markets = []
+                try:
+                    content = await post_weekly_calendar(finnhub_key, fred_key, markets)
+                    await discord.notify_economic_calendar_weekly(content)
+                    mark_weekly_posted()
+                    log.info("[calendar_task] weekly calendar posted")
+                except Exception as exc:
+                    log.warning("[calendar_task] weekly post failed: %s", exc)
+
+            # ── Weekday 7am daily alert ────────────────────────────────────────
+            if _is_weekday_7am_et() and not daily_alert_already_posted():
+                try:
+                    alert = await get_daily_calendar_alert(finnhub_key)
+                    if alert:
+                        await discord.notify_daily_calendar_alert(alert)
+                        log.info("[calendar_task] daily alert posted: %s", alert[:80])
+                    mark_daily_alert_posted()
+                except Exception as exc:
+                    log.warning("[calendar_task] daily alert failed: %s", exc)
+
+        except Exception as exc:
+            log.warning("[calendar_task] error: %s", exc)
+
+
+# ── Market open task ──────────────────────────────────────────────────────────
+
+async def _market_open_task() -> None:
+    """
+    Posts a market open snapshot to #market-open at 9:30am ET (13:30 UTC).
+    Checks every 5 minutes. Zero Claude calls.
+    """
+    fred_key    = getattr(settings, "fred_api_key", "")
+    finnhub_key = getattr(settings, "finnhub_api_key", "")
+    av_key      = getattr(settings, "alpha_vantage_key", "")
+
+    while True:
+        await asyncio.sleep(300)
+        try:
+            now_utc = datetime.datetime.utcnow()
+            # 9:30am ET = 13:30 UTC (summer) — check 13:25–13:59 window, weekdays only
+            is_open_time = (
+                now_utc.weekday() < 5
+                and now_utc.hour == 13
+                and now_utc.minute >= 25
+            )
+            if not is_open_time:
+                continue
+            if market_open_already_posted():
+                continue
+
+            content = await build_market_open(fred_key, finnhub_key, av_key)
+            await discord.notify_market_open(content)
+            mark_open_posted()
+            log.info("[open_task] market open posted")
+
+        except Exception as exc:
+            log.warning("[open_task] failed: %s", exc)
+
+
+# ── Market close task ─────────────────────────────────────────────────────────
+
+async def _market_close_task(model_override_fn=None) -> None:
+    """
+    Posts the market close reflection to #market-close at 4:00pm ET (20:00 UTC).
+    ONE Claude call per day. Checks every 5 minutes.
+    """
+    fred_key    = getattr(settings, "fred_api_key", "")
+    finnhub_key = getattr(settings, "finnhub_api_key", "")
+    av_key      = getattr(settings, "alpha_vantage_key", "")
+    sb_url      = getattr(settings, "supabase_url", "")
+    sb_key      = getattr(settings, "supabase_service_role_key", "")
+
+    while True:
+        await asyncio.sleep(300)
+        try:
+            now_utc = datetime.datetime.utcnow()
+            # 4:00pm ET = 20:00 UTC (summer) — check 19:55–20:59, weekdays only
+            is_close_time = (
+                now_utc.weekday() < 5
+                and now_utc.hour == 20
+                and now_utc.minute >= 0
+            )
+            if not is_close_time:
+                continue
+            if market_close_already_posted():
+                continue
+
+            model_ov = model_override_fn() if model_override_fn else None
+            content, cost = await build_market_close(
+                fred_api_key=fred_key,
+                finnhub_api_key=finnhub_key,
+                av_key=av_key,
+                supabase_url=sb_url,
+                supabase_key=sb_key,
+                anthropic_api_key=settings.anthropic_api_key,
+                claude_model=settings.claude_model,
+                model_override=model_ov,
+            )
+            await discord.notify_market_close(content)
+            mark_close_posted()
+            log.info("[close_task] market close posted cost=$%.4f", cost)
+
+        except Exception as exc:
+            log.warning("[close_task] failed: %s", exc)
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 async def main_async() -> None:
@@ -1527,6 +1666,13 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
+            calendar_task     = asyncio.create_task(
+                _economic_calendar_task(kalshi)
+            )
+            market_open_task  = asyncio.create_task(_market_open_task())
+            market_close_task = asyncio.create_task(
+                _market_close_task(model_override_fn=_model_override_fn)
+            )
             credit_check_task = asyncio.create_task(_credit_check_task())
 
             async def paper_cycle() -> None:
@@ -1589,6 +1735,13 @@ async def main_async() -> None:
             )
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
+            )
+            calendar_task     = asyncio.create_task(
+                _economic_calendar_task(kalshi)
+            )
+            market_open_task  = asyncio.create_task(_market_open_task())
+            market_close_task = asyncio.create_task(
+                _market_close_task(model_override_fn=_model_override_fn)
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
 
