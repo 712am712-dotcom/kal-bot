@@ -22,10 +22,17 @@ Rate-limit behaviour:
 from __future__ import annotations
 
 import asyncio
+import io
 import sys
 import time
 
 import httpx
+
+# Force UTF-8 stdout so emoji in category names don't crash on Windows cp1252 consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+else:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 OLD_CHANNELS_TO_DELETE = ["analysis", "intelligence"]
 

@@ -267,14 +267,33 @@ class DiscordBot:
         await asyncio.sleep(0.5)
         return int(result["id"])
 
+    async def _can_send(self, channel_id: int) -> bool:
+        """Quick access check — try fetching messages. 403 = bot lacks access."""
+        try:
+            r = await self._request("GET", f"/channels/{channel_id}/messages", params={"limit": 1})
+            return r.status_code not in (403, 401)
+        except Exception:
+            return False
+
     async def _find_or_create_channel(
         self, guild_id: int, name: str, category_id: int, position: int,
         private: bool = False,
     ) -> int:
+        bot_id = await self.get_bot_id()
+        candidates: list[int] = []
         for ch in await self._list_channels(guild_id):
             if ch["type"] == 0 and ch["name"].lower() == name.lower():
-                log.info("[discord_bot] channel #%s already exists (%s)", name, ch["id"])
-                return int(ch["id"])
+                candidates.append(int(ch["id"]))
+
+        # For channels with duplicates (can happen when recreating private channels),
+        # prefer the one the bot can actually access.
+        for ch_id in candidates:
+            if await self._can_send(ch_id):
+                log.info("[discord_bot] channel #%s exists + accessible (%s)", name, ch_id)
+                return ch_id
+        if candidates:
+            log.warning("[discord_bot] channel #%s exists but bot has no access — creating new one", name)
+
         payload: dict = {
             "name":      name,
             "type":      0,               # text channel
@@ -282,13 +301,11 @@ class DiscordBot:
             "position":  position,
         }
         if private:
-            # Deny @everyone the VIEW_CHANNEL permission (bit 0x400 = 1024)
-            payload["permission_overwrites"] = [{
-                "id":    str(guild_id),   # @everyone role has same id as guild
-                "type":  0,               # 0 = role
-                "allow": "0",
-                "deny":  "1024",          # VIEW_CHANNEL
-            }]
+            # Deny @everyone VIEW_CHANNEL; explicitly grant the bot user access.
+            payload["permission_overwrites"] = [
+                {"id": str(guild_id), "type": 0, "allow": "0",  "deny": "1024"},
+                {"id": str(bot_id),   "type": 1, "allow": str(1024 + 2048 + 8192 + 65536 + 64), "deny": "0"},
+            ]
         result = await self._post(f"/guilds/{guild_id}/channels", payload)
         log.info("[discord_bot] created channel #%s (private=%s) (%s)", name, private, result["id"])
         await asyncio.sleep(0.5)
