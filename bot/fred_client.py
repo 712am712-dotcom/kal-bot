@@ -13,7 +13,7 @@ Series tracked:
   CPIAUCSL        — CPI inflation (monthly)
   UNRATE          — Unemployment rate (monthly)
   DCOILWTICO      — WTI Crude Oil price (daily)
-  GOLDAMGBD228NLBM — Gold price (daily, LBMA PM fix)
+  GOLDPMGBD228NLBM — Gold price (daily, LBMA PM fix)
   MORTGAGE30US    — 30-year fixed mortgage rate (weekly)
   BAMLH0A0HYM2    — High yield corporate bond OAS (daily, credit fear gauge)
 
@@ -52,7 +52,7 @@ FRED_SERIES: list[tuple[str, str, str, str]] = [
     ("CPIAUCSL",         "cpi",            "idx","CPI (all items)"),
     ("UNRATE",           "unemployment",   "%",  "Unemployment Rate"),
     ("DCOILWTICO",       "oil_wti",        "$",  "WTI Crude Oil"),
-    ("GOLDAMGBD228NLBM", "gold",           "$",  "Gold (LBMA PM)"),
+    ("GOLDPMGBD228NLBM", "gold",           "$",  "Gold (LBMA PM)"),
     ("MORTGAGE30US",     "mortgage_30y",   "%",  "30-Year Mortgage Rate"),
     ("BAMLH0A0HYM2",     "hy_spread",      "%",  "High Yield Bond Spread"),
 ]
