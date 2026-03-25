@@ -56,3 +56,10 @@ bot/kal_journal.txt
 bot/kal_journal_state.json
 bot/kal_performance.csv
 bot/kal_performance.xlsx
+# Daily learning system — grows with each trading day
+bot/kal_lessons.json
+# Scheduler state — tracks what has been posted today
+bot/calendar_state.json
+bot/market_open_state.json
+bot/market_close_state.json
+bot/ideas_state.json
