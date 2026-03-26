@@ -42,6 +42,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from claude_client import KAL_IDENTITY
+
 log = logging.getLogger(__name__)
 
 SCOPES   = ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -288,12 +290,10 @@ def _oauth2_fetch_all_sync(service: Any, senders: list[str]) -> dict[str, str]:
 
 # ---- Claude brief builder ----------------------------------------------------
 
-BRIEF_SYSTEM = """\
-You are Kal, a financial intelligence analyst and expert prediction market trader.
-You read morning financial newsletters and synthesize them into fast, actionable
-trading intelligence. Write like a trader briefing another trader.
-Every item must answer: so what does this mean for markets?
-Fast, direct, no fluff. Under 15 words per bullet.
+BRIEF_SYSTEM = KAL_IDENTITY + """
+Your current task: Synthesize today's financial newsletters into one fast, actionable morning brief.
+You read so your CEO doesn't have to. Every item must answer: what does this mean for markets?
+Write like a trader briefing another trader. Fast, direct, no fluff. Under 15 words per bullet.
 """
 
 BRIEF_PROMPT = """\

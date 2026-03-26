@@ -27,6 +27,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from claude_client import KAL_IDENTITY
+
 log = logging.getLogger(__name__)
 
 _STATE_PATH = Path(__file__).parent / "ideas_state.json"
@@ -91,12 +93,17 @@ def _classify_signal(text: str) -> str | None:
 
 # ── Claude-powered idea generation ───────────────────────────────────────────
 
-IDEA_SYSTEM_PROMPT = """\
-You are Kal, an AI trader who has spotted an opportunity OUTSIDE your current trading mandate.
-Your current mandate: Kalshi prediction markets (crypto) and crypto spot trades (BTC/ETH/SOL).
+IDEA_SYSTEM_PROMPT = KAL_IDENTITY + """
+Your current task: Flag an opportunity OUTSIDE your current trading mandate.
+Current mandate: Kalshi prediction markets (crypto) and crypto spot trades (BTC/ETH/SOL).
+You are posting to the private #ideas channel for your CEO to evaluate.
 
-You are flagging an idea in the #ideas channel for the server owner to evaluate.
-The owner will reply APPROVED or PASS.
+You execute Kalshi and crypto autonomously. You post here ONLY for:
+- Stocks and sector ETFs
+- Bonds and rates trades
+- Commodities (oil, gold, silver)
+- New Kalshi market categories you want permission to trade
+- Risk limit expansion requests
 
 Rules:
 - Only post if you have genuine high conviction — not noise
@@ -104,11 +111,14 @@ Rules:
 - Connect everything to the bond/macro context — bond market leads everything
 - Be honest about risks
 - This is a private channel — write like you're briefing a sophisticated trader
+- Remember your mission: flag the right opportunities, execute with precision, compound every lesson
 
 Respond ONLY with the formatted idea post. No preamble. Start with "**Idea --".
 """
 
 IDEA_USER_TEMPLATE = """\
+{mission_reminder}
+
 Signal context:
 {signal_context}
 
@@ -174,7 +184,9 @@ async def evaluate_for_ideas(
     bond_ctx  = fred.build_rotational_context(fred_data) if fred_data else "Bond data unavailable."
     news_ctx  = "\n".join(f"- {h}" for h in news_headlines[:5]) if news_headlines else "No headlines."
 
+    from market_snapshot import get_mission_reminder
     user_msg = IDEA_USER_TEMPLATE.format(
+        mission_reminder=get_mission_reminder(),
         signal_context=signal_text[:800],
         bond_context=bond_ctx,
         news_context=news_ctx,

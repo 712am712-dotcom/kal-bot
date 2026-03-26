@@ -83,7 +83,72 @@ def load_lessons() -> dict:
     try:
         return json.loads(_LESSONS_PATH.read_text())
     except Exception:
-        return {"last_updated": None, "today": None, "history": [], "running_themes": []}
+        return {
+            "last_updated":  None,
+            "today":         None,
+            "history":       [],
+            "running_themes": [],
+            "mission_stats": {
+                "start_date":   datetime.date.today().isoformat(),
+                "total_wins":   0,
+                "total_losses": 0,
+                "paper_balance": 500.0,
+            },
+        }
+
+
+def get_mission_reminder() -> str:
+    """
+    Build the dynamic mission context string injected into every daily Claude prompt.
+    Format: "Today is YYYY-MM-DD. This is day X of Kal's operation. ..."
+    """
+    data    = load_lessons()
+    stats   = data.get("mission_stats", {})
+    today   = datetime.date.today().isoformat()
+
+    start_str = stats.get("start_date")
+    day_num   = None
+    if start_str:
+        try:
+            start   = datetime.date.fromisoformat(start_str)
+            day_num = (datetime.date.today() - start).days + 1
+        except Exception:
+            pass
+
+    wins    = stats.get("total_wins",    0)
+    losses  = stats.get("total_losses",  0)
+    balance = stats.get("paper_balance", 500.0)
+
+    parts = [f"Today is {today}."]
+    if day_num is not None:
+        parts.append(f"This is day {day_num} of Kal's operation.")
+    parts.append(f"Current paper balance: ${balance:,.2f}.")
+    parts.append(f"Trades to date: {wins} wins / {losses} losses.")
+    parts.append("Each day is the lowest point. Stack 1% every day.")
+    return " ".join(parts)
+
+
+def update_mission_stats(wins: int, losses: int, balance: float) -> None:
+    """
+    Persist cumulative trade stats to kal_lessons.json.
+    Called from market close after fetching today's trades.
+    """
+    data  = load_lessons()
+    stats = data.get("mission_stats", {})
+
+    if not stats.get("start_date"):
+        stats["start_date"] = datetime.date.today().isoformat()
+
+    # Accumulate — don't overwrite with today-only numbers
+    stats["total_wins"]    = stats.get("total_wins",    0) + wins
+    stats["total_losses"]  = stats.get("total_losses",  0) + losses
+    stats["paper_balance"] = balance
+
+    data["mission_stats"] = stats
+    try:
+        _LESSONS_PATH.write_text(json.dumps(data, indent=2))
+    except Exception as exc:
+        log.warning("[snapshot] mission stats write failed: %s", exc)
 
 
 def save_lesson(lesson_text: str, date_str: str) -> None:
@@ -410,8 +475,9 @@ async def build_market_close(
         crypto_task, fred_task, gold_task, oil_task, headlines_task, trades_task
     )
 
-    yesterday_lesson = get_yesterday_lesson()
-    themes = get_running_themes()
+    yesterday_lesson  = get_yesterday_lesson()
+    themes            = get_running_themes()
+    mission_reminder  = get_mission_reminder()
 
     # Build the Claude prompt
     date_str = _et_now()
@@ -424,6 +490,7 @@ async def build_market_close(
 
     context_lines = [
         f"Today's date: {date_str}",
+        f"Mission context: {mission_reminder}",
         "",
         "PRICE DATA:",
         f"Bitcoin: {_fmt_price(btc.get('price'))} {_fmt_chg(btc.get('change_24h'))}",
@@ -466,11 +533,11 @@ async def build_market_close(
 
     context = "\n".join(context_lines)
 
-    system = """\
-You are Kal, an AI trader who reads bonds, tracks macro rotation, and reflects on every trading day.
-
-Your market close reflection is your most important post. It's where you connect the dots between
-bonds, macro, sectors, and today's specific price action. Be honest about your trades.
+    from claude_client import KAL_IDENTITY
+    system = KAL_IDENTITY + """
+Your current task: Write the daily market close reflection. This is your most important post.
+It is where you connect the dots between bonds, macro, sectors, and today's specific price action.
+It is also where you extract today's lesson — the one insight that makes you 1% better tomorrow.
 
 Bond market leads everything. Always explain what yields are saying before explaining equity or crypto moves.
 
@@ -478,9 +545,10 @@ Rules:
 - Be specific: use the actual prices, yields, and percentages provided
 - If yields moved, say by how much and what it means for risk assets
 - Connect bond moves to equity/crypto moves — show the transmission mechanism
-- Acknowledge your wrong calls. Kal gets better by being honest about misses.
+- Acknowledge your wrong calls. You get better by being honest about misses.
 - Today's lesson must be specific and reference actual prices and events from today
-- Yesterday's lesson check: did Kal improve on the miss? Be honest.
+- Yesterday's lesson check: did today's trading show improvement on yesterday's miss? Be honest.
+- You are compounding. Every lesson builds on the last. Reference running themes if they apply.
 
 Respond ONLY with the formatted reflection post. No preamble. Use the exact format provided.
 """

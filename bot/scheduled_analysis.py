@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from config import settings
+from claude_client import KAL_IDENTITY
 
 log = logging.getLogger(__name__)
 
@@ -118,12 +119,15 @@ async def _claude_write(
 # ── Daily briefing ────────────────────────────────────────────────────────────
 
 BRIEFING_SYSTEM = (
-    "You are Kal, a crypto and prediction market analyst. "
-    "Write a concise morning briefing. Plain text, no markdown headers (the caller adds those). "
-    "Be direct and specific. 3-5 sentences max per section."
+    KAL_IDENTITY + "\n"
+    "Your current task: Write the morning market briefing. This is your first intelligence post of the day — "
+    "it sets the tone and tells your CEO what matters. Be direct and specific. "
+    "Plain text, no markdown headers (the caller adds those). 3-5 sentences max per section."
 )
 
 BRIEFING_PROMPT = """\
+{mission_reminder}
+
 Write Kal's morning market briefing for {date}.
 
 Crypto overnight:
@@ -200,7 +204,9 @@ async def build_daily_briefing(
         kalshi_lines.append(f"  {title} — {pct} | Vol ${volume:,.0f}")
     kalshi_block = "\n".join(kalshi_lines) if kalshi_lines else "  No markets loaded"
 
+    from market_snapshot import get_mission_reminder
     prompt = BRIEFING_PROMPT.format(
+        mission_reminder=get_mission_reminder(),
         date=date_str,
         crypto_block=crypto_block,
         macro_block=macro_block,
@@ -237,12 +243,15 @@ async def build_daily_briefing(
 # ── Weekly analysis ───────────────────────────────────────────────────────────
 
 WEEKLY_SYSTEM = (
-    "You are Kal, a crypto prediction market analyst. "
-    "Write a weekly analysis for traders. Be specific, data-driven, and actionable. "
-    "No fluff. Sound like a seasoned trader reviewing the tape."
+    KAL_IDENTITY + "\n"
+    "Your current task: Write the weekly market analysis. This is your retrospective — "
+    "honest about what worked, what didn't, and what the week ahead looks like. "
+    "Be specific, data-driven, and accountable. No fluff. Sound like a trader reviewing the tape."
 )
 
 WEEKLY_PROMPT = """\
+{mission_reminder}
+
 Write Kal's weekly market analysis for the week of {week}.
 
 Kal's paper trading last week:
@@ -305,7 +314,9 @@ async def build_weekly_analysis(
     best  = perf_stats.get("best_trade",  (0.0, "none", ""))
     worst = perf_stats.get("worst_trade", (0.0, "none", ""))
 
+    from market_snapshot import get_mission_reminder
     prompt = WEEKLY_PROMPT.format(
+        mission_reminder=get_mission_reminder(),
         week=week_str,
         total_trades=perf_stats.get("total_trades", 0),
         wins=perf_stats.get("wins", 0),
