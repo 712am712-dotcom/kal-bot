@@ -291,9 +291,13 @@ def _oauth2_fetch_all_sync(service: Any, senders: list[str]) -> dict[str, str]:
 # ---- Claude brief builder ----------------------------------------------------
 
 BRIEF_SYSTEM = KAL_IDENTITY + """
-Your current task: Synthesize today's financial newsletters into one fast, actionable morning brief.
-You read so your CEO doesn't have to. Every item must answer: what does this mean for markets?
-Write like a trader briefing another trader. Fast, direct, no fluff. Under 15 words per bullet.
+Your current task: Synthesize today's financial newsletters into one sharp, connected morning brief.
+You are not summarizing — you are finding the narrative thread that connects today's news into one coherent picture.
+Write like a sharp analyst briefing another trader: direct, specific, with clear trade implications.
+Every sentence must answer "so what does this mean for my money?"
+Use analogies when they clarify — never when they're just decorative. Never use the word "significant" or "notable."
+The Big Picture section is the most important — it must make the reader feel like they understand what the market is pricing in today.
+The Trade Today is the second most important — one clear, high conviction thought.
 """
 
 BRIEF_PROMPT = """\
@@ -305,51 +309,38 @@ de-duplicate overlapping stories, and synthesize into ONE unified morning brief.
 TOP KALSHI MARKETS RIGHT NOW:
 {kalshi_block}
 
-Produce EXACTLY this format -- every section is mandatory:
+Produce EXACTLY this format:
 
 **Morning Brief -- {date}**
-*What matters today. What's the trade.*
+*[One sentence that connects the biggest themes of the day -- what is the story today? Not a list, one thread.]*
 
-**MACRO**
-- [Item] -- [market implication in under 15 words]
-(2-4 bullets, only items that actually move markets)
+**The Big Picture**
+[2-3 sentences connecting the macro dots. What is the market actually pricing in today? What is the tension or the key question traders are asking? Write like a smart friend explaining it over coffee. Use analogies when they help -- but only good ones. Example: "The bond market is acting like a lie detector right now -- it's saying the Fed won't cut anytime soon, even as stocks are acting like everything is fine." Do NOT use the words "significant" or "notable" -- be specific instead.]
 
-**CRYPTO**
-- [Item] -- [1-line implication for BTC/ETH/SOL]
-(1-3 bullets, crypto-specific news only)
+**What's Moving and Why**
+[3-6 bullet points. Each one MUST follow this exact structure:
+- [What happened] → [Why it matters for markets] → [Trade angle or implication, if any]
+Only include items that have a clear answer to "so what for my money?" If something has no trade implication, skip it. Do NOT use the words "significant" or "notable".]
 
-**AI & TECH**
-- [Item] -- [market impact in under 15 words]
-(1-3 bullets, major AI/tech developments that affect markets)
+**The Trade Today**
+[Kal's single highest conviction observation from today's news. NOT a list -- one clear, direct thought. What is the single most actionable thing in today's brief? Could be a Kalshi market angle, a crypto read, a stock or sector setup, a macro theme to fade or follow. Write it like a trader talking to another trader. End with a plain English version in parentheses for context, e.g., "(In plain English: the bond market is pricing in higher rates for longer, which is bad for growth stocks and crypto)."]
 
-**BIG MONEY**
-- [Notable deal/funding/institutional flow] -- why it matters
-(1-3 bullets, significant capital movements only)
+**Prediction Market Angles**
+[Only include if there are GENUINE Kalshi connections to today's news -- not forced. If there are real connections: name the specific Kalshi market from the list above, its current crowd price, and in one sentence why it might be wrong given today's news. If there are no high conviction Kalshi angles today, write exactly: "No high conviction Kalshi angles today." Never manufacture a connection just to fill this section.]
 
-**TRADER'S ANGLE**
-- Stocks: [Key movers, sectors showing strength/weakness]
-- Crypto: [BTC/ETH/SOL overnight action, sentiment, key levels]
-- Commodities: [Oil, gold, silver -- significant moves only]
-- Rates: [Bond market, yield curve, Fed implications]
-- Sectors: [Which sectors leading/lagging and why]
-- Setup of the day: [One specific trade setup worth watching today]
-
-**PREDICTION MARKET ANGLE**
-[2-3 sentences connecting today's headlines to Kalshi prediction markets.
-Name actual markets from the list above with their current prices.
-Explain why they might be mispriced given today's news.]
-
-**TODAY'S FOCUS**
-[1-2 sentences -- the single most important thing to watch today and why
-it matters specifically for prediction markets]
+**Watch List**
+- [Specific thing to monitor and exactly why -- what price, event, or signal matters]
+- [Second item, same format]
+[Optional third item only if genuinely worth watching]
+Maximum 3 items. Only things a trader would actually check during the day.
 
 Rules:
-- Every bullet must have a direct market implication -- skip anything that doesn't
 - De-duplicate: if multiple newsletters cover the same story, combine into one bullet
-- PREDICTION MARKET ANGLE is MANDATORY -- always connect news to Kalshi
-- Keep each bullet under 15 words
-- TODAY'S FOCUS must be prediction-market oriented
-- If a section genuinely has no content, write "-- nothing notable today"
+- Do NOT use the words "significant" or "notable" anywhere -- be specific
+- The Big Picture must connect at least 2-3 of today's stories into one coherent narrative
+- The Trade Today is mandatory -- there is always one most actionable thing
+- Watch List max 3 items, never pad it
+- Write like a trader briefing another trader, not like a financial newsletter
 """
 
 
@@ -404,7 +395,7 @@ async def build_morning_brief(
     client  = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=active_model,
-        max_tokens=1400,
+        max_tokens=1600,
         system=BRIEF_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -531,12 +522,14 @@ GmailReader = EmailReader
 # ---- Convenience export ------------------------------------------------------
 
 def extract_todays_focus(brief: str) -> str:
-    """Pull just the TODAY'S FOCUS section from a brief for #intelligence."""
+    """Pull the 'The Trade Today' section from a brief for #intelligence-feed cross-post."""
+    # New format: **The Trade Today**
+    # Legacy format: **TODAY'S FOCUS**
     match = re.search(
-        r"\*\*TODAY'S FOCUS\*\*(.*?)(?:\*\*[A-Z]|\Z)",
+        r"\*\*(?:The Trade Today|TODAY'S FOCUS)\*\*(.*?)(?=\*\*[A-Z]|\Z)",
         brief,
         re.DOTALL | re.IGNORECASE,
     )
     if match:
-        return "**Today's Focus**\n" + match.group(1).strip()
+        return "**The Trade Today**\n" + match.group(1).strip()
     return ""
