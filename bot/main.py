@@ -42,7 +42,8 @@ from scheduled_analysis import (
     should_post_daily_briefing, mark_briefing_posted,
     should_post_weekly, mark_weekly_posted,
 )
-from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus
+from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus, evaluate_axios_alert
+import email_reader as _er
 from technical_analysis import TechnicalAnalyzer
 from performance_tracker import PerformanceTracker
 import journal as journal_mod
@@ -1366,6 +1367,78 @@ async def _gmail_brief_task(
             log.warning("[brief_task] failed: %s", exc)
 
 
+# ── Axios breaking news alerts task ───────────────────────────────────────────
+
+async def _axios_alerts_task(
+    gmail: GmailReader,
+    kalshi: "KalshiClient",
+    model_override_fn=None,
+) -> None:
+    """
+    Check for new Axios breaking news alerts every 30 minutes throughout the day.
+    Evaluates market impact via one Claude call per alert.
+    Posts to #breaking-news. Max MAX_BREAKING_PER_DAY posts per day.
+    """
+    while True:
+        await asyncio.sleep(1800)  # 30 minutes
+
+        if not gmail.is_configured:
+            continue
+
+        today = datetime.date.today().isoformat()
+
+        # Check daily cap before making any IMAP connection
+        if _er._breaking_date == today and _er._breaking_count >= _er.MAX_BREAKING_PER_DAY:
+            log.debug("[axios-alerts] daily cap reached (%d), skipping check", _er.MAX_BREAKING_PER_DAY)
+            continue
+
+        try:
+            alerts = await gmail.fetch_recent_axios_alerts()
+            if not alerts:
+                continue
+
+            log.info("[axios-alerts] %d new alert(s) to evaluate", len(alerts))
+
+            try:
+                resp    = await kalshi._get("/markets", params={"status": "open", "limit": 100})
+                markets = resp.get("markets", [])
+            except Exception as exc:
+                log.warning("[axios-alerts] failed to fetch markets: %s", exc)
+                markets = []
+
+            model_ov = model_override_fn() if model_override_fn else None
+
+            for alert in alerts:
+                # Re-check cap inside the batch
+                if _er._breaking_date == today and _er._breaking_count >= _er.MAX_BREAKING_PER_DAY:
+                    log.info("[axios-alerts] daily cap (%d) hit mid-batch, stopping", _er.MAX_BREAKING_PER_DAY)
+                    break
+
+                try:
+                    post, cost = await evaluate_axios_alert(
+                        alert, markets,
+                        settings.anthropic_api_key,
+                        model_ov or settings.claude_model,
+                    )
+
+                    if cost > 0:
+                        log.info("[axios-alerts] alert eval cost=$%.4f", cost)
+
+                    if post:
+                        await discord.notify_breaking_alert(post)
+                        if _er._breaking_date != today:
+                            _er._breaking_count = 0
+                            _er._breaking_date  = today
+                        _er._breaking_count += 1
+                        log.info("[axios-alerts] posted alert #%d today", _er._breaking_count)
+
+                except Exception as exc:
+                    log.warning("[axios-alerts] alert evaluation failed: %s", exc)
+
+        except Exception as exc:
+            log.warning("[axios-alerts] check failed: %s", exc)
+
+
 # ── Market Intelligence task ──────────────────────────────────────────────────
 
 def _update_scanner_prices(scanner: "IntelligenceScanner") -> None:
@@ -1666,6 +1739,9 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
+            axios_alerts_task = asyncio.create_task(
+                _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
+            )
             calendar_task     = asyncio.create_task(
                 _economic_calendar_task(kalshi)
             )
@@ -1735,6 +1811,9 @@ async def main_async() -> None:
             )
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
+            )
+            axios_alerts_task = asyncio.create_task(
+                _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
             calendar_task     = asyncio.create_task(
                 _economic_calendar_task(kalshi)
