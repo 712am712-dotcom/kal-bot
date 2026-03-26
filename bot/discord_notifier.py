@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from config import settings
+import fallback_notifier
 
 log = logging.getLogger(__name__)
 
@@ -90,9 +91,10 @@ def _get_webhook(channel: str) -> str | None:
     return fallback or None
 
 
-async def _send(channel: str, payload: dict) -> None:
+async def _discord_raw(channel: str, payload: dict) -> None:
     """
-    Fire-and-forget send. Never raises — Discord must never block the bot.
+    Raw Discord send — bot API first, then webhook. Raises on failure
+    so that fallback_notifier.route_send can detect and handle it.
 
     Routing priority:
       1. Bot API (direct channel send) — used when send_channel_guide() has run
@@ -103,41 +105,59 @@ async def _send(channel: str, payload: dict) -> None:
     if _bot is not None:
         ch_id = _bot.channel_id(channel)
         if ch_id:
-            try:
-                await _bot.send(ch_id, payload)
-                return
-            except Exception as exc:
-                log.warning("[discord/%s] bot send failed, falling back to webhook: %s", channel, exc)
+            await _bot.send(ch_id, payload)
+            return
 
-    # ── 2 & 3. Webhook fallback ───────────────────────────────────────────────
+    # ── 2 & 3. Webhook ────────────────────────────────────────────────────────
     url = _get_webhook(channel)
     if not url:
         return
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code not in (200, 204):
-                log.warning("[discord/%s] %s %s", channel, resp.status_code, resp.text[:200])
-    except Exception as exc:
-        log.warning("[discord/%s] send failed: %s", channel, exc)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, json=payload)
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+
+async def _discord_raw_file(
+    channel: str, payload: dict, filename: str, file_bytes: bytes, mime: str
+) -> None:
+    """Raw Discord file send via webhook. Raises on failure."""
+    url = _get_webhook(channel)
+    if not url:
+        return
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            url,
+            data={"payload_json": json.dumps(payload)},
+            files={"file": (filename, file_bytes, mime)},
+        )
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+
+async def _send(channel: str, payload: dict, message_type: str = "") -> None:
+    """
+    Fire-and-forget send. Never raises — Discord must never block the bot.
+    Routes through fallback_notifier for health tracking, email fallback,
+    Supabase logging, and local file logging.
+    """
+    await fallback_notifier.route_send(
+        channel, payload,
+        discord_send_fn=_discord_raw,
+        message_type=message_type,
+    )
 
 
 async def _send_file(channel: str, payload: dict, filename: str, file_bytes: bytes, mime: str) -> None:
-    """Send a message with a file attachment."""
-    url = _get_webhook(channel)
-    if not url:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                data={"payload_json": json.dumps(payload)},
-                files={"file": (filename, file_bytes, mime)},
-            )
-            if resp.status_code not in (200, 204):
-                log.warning("[discord/%s] file send %s %s", channel, resp.status_code, resp.text[:200])
-    except Exception as exc:
-        log.warning("[discord/%s] file send failed: %s", channel, exc)
+    """Send a message with a file attachment. Logs delivery to Supabase and local file."""
+    await fallback_notifier.route_send_file(
+        channel, payload,
+        discord_send_fn=_discord_raw_file,
+        filename=filename,
+        file_bytes=file_bytes,
+        mime=mime,
+        message_type="file_attachment",
+    )
 
 
 def _embed(

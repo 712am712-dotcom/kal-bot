@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     # Generic IMAP (primary -- works with Outlook, Gmail, Yahoo, any provider)
     kal_email_address:     str = Field(default="", description="Kal's email address for IMAP auth (Outlook, Gmail, etc.)")
     kal_email_password:    str = Field(default="", description="Password for IMAP access -- Outlook account password or Gmail App Password")
+    kal_owner_email:       str = Field(default="", description="Owner email — receives fallback alerts when Discord is unavailable")
     # Legacy Gmail-specific fields (kept for backward compat -- kal_email_address takes priority)
     kal_gmail_address:     str = Field(default="", description="[Legacy] Kal's Gmail address for App Password IMAP")
     kal_gmail_app_password: str = Field(default="", description="[Legacy] Gmail App Password")
