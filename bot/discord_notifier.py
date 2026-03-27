@@ -1,11 +1,12 @@
 """
 discord_notifier.py — Discord notifications for Kal.
 
-15 channels across 5 categories:
-  🧠 INTELLIGENCE  morning-brief, breaking-news, big-money, thesis
-  📊 MARKETS       trades, watchlist, weekly-analysis
-  📈 ASSET CLASSES crypto, stocks, prediction-markets, commodities
-  🚨 SIGNALS       high-conviction, intelligence-feed
+10 channels across 6 categories:
+  🧠 INTELLIGENCE  morning-brief, breaking-news
+  📊 TRADING       trades, trade-history
+  🔄 DAILY PULSE   market-pulse
+  📅 RESEARCH      thesis, economic-calendar
+  💡 IDEAS         ideas
   ⚙️ SYSTEM        summary, alerts
 
 All messages:
@@ -302,7 +303,7 @@ async def notify_ai_decision(
     lines.append(f"\n{plain}")
 
     mode_tag = "paper" if mode in ("paper", "research") else "live"
-    await _send("crypto", _embed(
+    await _send("market-pulse", _embed(
         "\n".join(lines),
         COLOR_GREEN if is_yes else COLOR_RED,
         footer=f"{coin_full} · {mode_tag} · {_now_et()}",
@@ -426,7 +427,7 @@ async def notify_trade_resolved(
         color = COLOR_RED
 
     tag = "paper" if mode.upper() not in ("LIVE",) else "live"
-    await _send("trades", _embed(
+    await _send("trade-history", _embed(
         f"{main}\n{pnl_line}",
         color,
         footer=f"{ticker} · {tag} · win rate {win_rate} · {_now_et()}",
@@ -819,9 +820,9 @@ async def notify_connection_issue(service: str, error: str) -> None:
 # ── Technical Analysis notifications ──────────────────────────────────────────
 
 async def notify_ta_hourly_summary(coin: str, summary_text: str) -> None:
-    """Post hourly TA summary to #crypto."""
+    """Post hourly TA summary to #market-pulse."""
     coin_full = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana"}.get(coin.upper(), coin)
-    await _send("crypto", _embed(
+    await _send("market-pulse", _embed(
         summary_text,
         COLOR_BLUE,
         footer=f"{coin_full} · technical · {_now_et()}",
@@ -829,8 +830,8 @@ async def notify_ta_hourly_summary(coin: str, summary_text: str) -> None:
 
 
 async def notify_market_pulse(pulse_text: str) -> None:
-    """Post the combined hourly Market Pulse (BTC+ETH+SOL) to #crypto."""
-    await _send("crypto", {
+    """Post the combined hourly Market Pulse (BTC+ETH+SOL) to #market-pulse."""
+    await _send("market-pulse", {
         "content": pulse_text,
         "username": KAL,
     })
@@ -839,8 +840,8 @@ async def notify_market_pulse(pulse_text: str) -> None:
 # ── News Intelligence notifications ───────────────────────────────────────────
 
 async def notify_news_thesis(thesis: str, markets: list[dict], headline: str) -> None:
-    """Post a full news-to-market thesis to #intelligence-feed."""
-    await _send("intelligence-feed", {
+    """Post a full news-to-market thesis to #market-pulse."""
+    await _send("market-pulse", {
         "embeds": [{
             "title": "Thesis",
             "description": thesis[:3900],
@@ -927,7 +928,7 @@ async def notify_economic_calendar(events: list[dict], markets: list[dict]) -> N
                 for _, title, pct, vol in matched[:3]:
                     lines.append(f"• {title[:60]} — {pct}%")
 
-    await _send("intelligence-feed", _embed(
+    await _send("economic-calendar", _embed(
         "\n".join(lines),
         COLOR_BLUE,
         footer=f"calendar · {_now_et()}",
@@ -942,8 +943,8 @@ async def notify_daily_briefing(content: str) -> None:
 
 
 async def notify_weekly_analysis(content: str) -> None:
-    """Post the weekly analysis to #weekly-analysis."""
-    await _send("weekly-analysis", {"content": content, "username": KAL})
+    """Post the weekly analysis to #thesis."""
+    await _send("thesis", {"content": content, "username": KAL})
 
 
 async def notify_morning_brief(brief: str) -> None:
@@ -965,10 +966,10 @@ async def notify_morning_brief(brief: str) -> None:
 
 
 async def notify_todays_focus(focus: str) -> None:
-    """Cross-post the TODAY'S FOCUS section from the brief to #intelligence-feed."""
+    """Cross-post The Trade Today section from the brief to #market-pulse."""
     if not focus:
         return
-    await _send("intelligence-feed", _embed(
+    await _send("market-pulse", _embed(
         focus,
         COLOR_GOLD,
         footer=f"morning brief · {_now_et()}",
@@ -982,122 +983,64 @@ async def notify_todays_focus(focus: str) -> None:
 
 _GUIDE_MORNING_BRIEF = (
     "**Kal — #morning-brief**\n"
-    "Posted every morning between 5:30–9am ET. Kal reads 5 financial newsletters and synthesizes them into one brief.\n\n"
-    "**What you'll see:** Macro headlines with trade implications · Crypto signals · AI & tech moves · Big institutional flows · "
-    "Sector breakdown · The day's best trade setup · Which Kalshi markets connect to today's news.\n\n"
-    "One post per morning. Today's key insight also cross-posted to #intelligence-feed."
+    "Posted every morning between 5:30–9am ET. Kal reads 28 financial newsletters and synthesizes them into one brief.\n\n"
+    "**What you'll see:** The day's connecting theme in one sentence · Macro big picture with trade implications · "
+    "What's moving and why (with explicit trade angles) · The single highest conviction idea of the day · "
+    "Any genuine Kalshi angles · Today's watch list.\n\n"
+    "One post per morning. The Trade Today insight also cross-posted to #market-pulse."
 )
 
 _GUIDE_BREAKING_NEWS = (
     "**Kal — #breaking-news**\n"
-    "Real-time alerts when major market-moving events happen.\n\n"
-    "**What you'll see:** Breaking headlines from financial news sources · Which Kalshi markets are affected · "
-    "Current crowd pricing on those markets.\n\n"
-    "Only posts when something significant happens. Not a firehose."
+    "Real-time alerts when major market-moving events happen. Axios breaking news evaluated for market impact.\n\n"
+    "**What you'll see:** Breaking headlines · Market angle and trade implication · "
+    "Which Kalshi markets could move · Current crowd pricing.\n\n"
+    "Max 5 posts per day. Only posts when there's a genuine market angle."
 )
 
-_GUIDE_BIG_MONEY = (
-    "**Kal — #big-money**\n"
-    "Tracks where large capital is flowing: institutions, bonds, commodities, sector rotations.\n\n"
-    "**What you'll see:** Unusual options activity · Bond yield moves · Gold and oil flows · "
-    "Sector rotation signals · Institutional positioning changes.\n\n"
-    "Signal-to-noise focused. Only posts when capital movement is significant."
-)
-
-_GUIDE_THESIS = (
-    "**Kal — #thesis**\n"
-    "Kal's longer-form market reads with full reasoning laid out.\n\n"
-    "**What you'll see:** Multi-paragraph analysis on specific setups · Why Kal thinks the crowd is wrong · "
-    "Full chain of reasoning from data to conclusion.\n\n"
-    "Rare — only posted when Kal has high conviction with a lot to say."
-)
-
-# ── 📊 MARKETS ────────────────────────────────────────────────────────────────
+# ── 📊 TRADING ────────────────────────────────────────────────────────────────
 
 _GUIDE_TRADES = (
     "**Kal — #trades**\n"
-    "Every trade Kal places and the result when it settles.\n\n"
-    "**Trade Placed** — Kal put money on a market. Shows coin, direction, amount, odds, and what needs to happen to win.\n"
-    "**Win** — Trade resolved in Kal's favor. Shows profit and updated record.\n"
-    "**Loss** — Trade resolved against Kal. Shows the loss and running record.\n"
+    "Open positions only. Every trade Kal currently has live.\n\n"
+    "**Trade Placed** — Kal put money on a market. Shows coin, direction, amount, odds, and win condition.\n"
     "**Position Update** — Snapshot of all currently open trades.\n\n"
+    "Clears automatically when a position resolves. Check #trade-history for the full record."
+)
+
+_GUIDE_TRADE_HISTORY = (
+    "**Kal — #trade-history**\n"
+    "Every closed trade — wins and losses. The permanent record. This is where the track record lives.\n\n"
+    "**Win** — Trade resolved in Kal's favor. Shows profit and updated record.\n"
+    "**Loss** — Trade resolved against Kal. Shows the loss and running record.\n\n"
     "All trades are paper (simulated) until Kal is switched to live mode."
 )
 
-_GUIDE_WATCHLIST = (
-    "**Kal — #watchlist**\n"
-    "Markets Kal is eyeing but hasn't traded yet. Worth watching.\n\n"
-    "**What you'll see:** Markets with interesting setups that don't quite meet Kal's trade threshold · "
-    "Why the crowd might be wrong · What needs to change to make this a real trade.\n\n"
-    "Think of this as Kal's scratch pad — interesting but not yet actionable."
+# ── 🔄 DAILY PULSE ────────────────────────────────────────────────────────────
+
+_GUIDE_MARKET_PULSE = (
+    "**Kal — #market-pulse**\n"
+    "Kal's live market feed. Everything happening in markets — in one place.\n\n"
+    "**Market open 9:30am ET** — Where Bitcoin, Ethereum, Solana, gold, oil, and bonds are opening. "
+    "Plus yields and the one thing worth watching today.\n"
+    "**Hourly TA updates** — Technical analysis for BTC, ETH, SOL throughout the day. "
+    "Price action, RSI, MACD, trend, and Kalshi crowd pricing.\n"
+    "**Intelligence signals** — Price shifts, volume spikes, new 15-minute windows with real money in. "
+    "High conviction signals flagged with ⚡.\n"
+    "**Market close 4pm ET** — Kal's daily reflection. What moved, why, what he learned.\n\n"
+    "This is the heartbeat channel."
 )
 
-_GUIDE_WEEKLY = (
-    "**Kal — #weekly-analysis**\n"
-    "Posted every Monday at ~8am ET.\n\n"
-    "**What you'll see:** Last week's trading performance · Win rate and P&L breakdown · "
-    "Market review for the past week · Top setups for the week ahead · Kalshi opportunities on Kal's radar.\n\n"
-    "One post per week. Covers crypto, macro, and Kalshi prediction markets."
+# ── 📅 RESEARCH ───────────────────────────────────────────────────────────────
+
+_GUIDE_THESIS = (
+    "**Kal — #thesis**\n"
+    "Bigger picture analysis. Posted when there's something genuinely worth saying.\n\n"
+    "**What you'll see:** Weekly breakdowns every Monday — last week's performance, market review, "
+    "top setups for the week ahead · Sector and macro reads · Watchlist opportunities · "
+    "Kal's longer-form market theses with full reasoning.\n\n"
+    "Not a firehose. Every post here earned its place."
 )
-
-# ── 📈 ASSET CLASSES ──────────────────────────────────────────────────────────
-
-_GUIDE_CRYPTO = (
-    "**Kal — #crypto**\n"
-    "Bitcoin, Ethereum, and Solana analysis — TA updates, Kal's market reads, and on-chain signals.\n\n"
-    "**What you'll see:** Hourly technical analysis for BTC, ETH, SOL · "
-    "Price action reads (support/resistance, trend, momentum) · "
-    "Kal's probability assessment vs. Kalshi crowd pricing · Volume signals.\n\n"
-    "Updated every 30–60 minutes while markets are active."
-)
-
-_GUIDE_STOCKS = (
-    "**Kal — #stocks**\n"
-    "Equity market moves, earnings, and sector analysis with prediction market implications.\n\n"
-    "**What you'll see:** Sector strength/weakness · Key stock movers · Earnings beats/misses · "
-    "S&P 500 and Nasdaq reads · How stock moves connect to Kalshi markets.\n\n"
-    "Posted when notable moves or catalysts appear."
-)
-
-_GUIDE_PREDICTION_MARKETS = (
-    "**Kal — #prediction-markets**\n"
-    "Kalshi-specific analysis — which markets look mispriced, crowd behavior, and opportunity mapping.\n\n"
-    "**What you'll see:** Deep dives on specific Kalshi markets · Crowd pricing vs. Kal's model · "
-    "Which contracts have the most edge · Market mechanics and liquidity analysis.\n\n"
-    "Kalshi-focused. The core of what Kal does."
-)
-
-_GUIDE_COMMODITIES = (
-    "**Kal — #commodities**\n"
-    "Oil, gold, silver, and broader commodities analysis.\n\n"
-    "**What you'll see:** WTI and Brent crude reads · Gold as a macro signal · "
-    "Silver and industrial metals · Commodity price implications for prediction markets.\n\n"
-    "Posted when commodity moves are significant enough to affect markets."
-)
-
-# ── 🚨 SIGNALS ────────────────────────────────────────────────────────────────
-
-_GUIDE_HIGH_CONVICTION = (
-    "**Kal — #high-conviction**\n"
-    "Only Kal's strongest setups. Rare. When this posts, pay attention.\n\n"
-    "**What you'll see:** Markets pricing at >92% or <8% with real volume — "
-    "extreme crowd conviction with money behind it · "
-    "Kal's assessment of whether that conviction is justified.\n\n"
-    "Posts maybe 1–3 times per day maximum. Not frequent by design."
-)
-
-_GUIDE_INTELLIGENCE_FEED = (
-    "**Kal — #intelligence-feed**\n"
-    "Live market surveillance — price shifts, volume spikes, new windows, and market snapshots.\n\n"
-    "**Price Shift** — Crowd moved 10+ points since last scan. Opinion is changing fast.\n"
-    "**Volume Spike** — Trading volume doubled in one window. Real money flowing in.\n"
-    "**New Window** — Fresh 15-minute market opened with significant volume already in.\n"
-    "**Market Snapshot** — Hourly summary of all active markets with current pricing.\n"
-    "**Today's Focus** — Morning brief key insight cross-posted here.\n\n"
-    "Alerts fire at most once per hour per market. High signal, low noise."
-)
-
-# ── 📅 CALENDAR ───────────────────────────────────────────────────────────────
 
 _GUIDE_ECONOMIC_CALENDAR = (
     "**Kal — #economic-calendar**\n"
@@ -1107,29 +1050,7 @@ _GUIDE_ECONOMIC_CALENDAR = (
     "Current bond market readings (yields, curve, credit spreads) · "
     "Key macro data (CPI, unemployment, oil, gold) · "
     "Kalshi markets that connect to this week's events · Theme for the week.\n\n"
-    "Daily alerts posted to #morning-brief on weekdays when major economic events are scheduled that day."
-)
-
-# ── 🔄 DAILY ROUTINE ──────────────────────────────────────────────────────────
-
-_GUIDE_MARKET_OPEN = (
-    "**Kal — #market-open**\n"
-    "Posted at 9:30am ET every weekday. Where markets are opening — crypto, bonds, gold, oil — "
-    "and the one thing worth watching today.\n\n"
-    "**What you'll see:** Bitcoin, Ethereum, Solana with overnight changes · "
-    "Gold, oil, and dollar index levels · "
-    "10Y and 2Y Treasury yields with yield curve status · "
-    "Biggest overnight headline · Today's watch item.\n\n"
-    "Pure data. No fluff. Everything you need in 30 seconds."
-)
-
-_GUIDE_MARKET_CLOSE = (
-    "**Kal — #market-close**\n"
-    "Posted at 4:00pm ET every weekday. Kal's full daily reflection.\n\n"
-    "**What you'll see:** What moved and why · Where the bond market went and what it means · "
-    "Where institutional money rotated · Trade opportunities Kal spots across all markets · "
-    "Kal's own trade results for the day (WIN/LOSS) · What Kal learned today and how he's improving.\n\n"
-    "This is where Kal gets better every day. One Claude call per day."
+    "Daily event alerts also posted here on weekdays with major scheduled releases."
 )
 
 _GUIDE_IDEAS = (
@@ -1213,7 +1134,7 @@ async def notify_intelligence_price_move(snap: dict, prev_price: float) -> None:
     shift_pct = round(abs(shift) * 100)
 
     crowd_read = _crowd_direction(curr)
-    await _send("intelligence-feed", _embed(
+    await _send("market-pulse", _embed(
         f"**Price Shift — {coin_full}**\n"
         f"Crowd moved **{shift_pct} points {direction}** since last scan.\n"
         f"Was: {prev_pct}% → Now: **{curr_pct}%** ({crowd_read})\n"
@@ -1231,7 +1152,7 @@ async def notify_intelligence_volume_spike(snap: dict, prev_volume: float) -> No
     crowd_pct = round(snap["yes_price"] * 100)
     crowd_read = _crowd_direction(snap["yes_price"])
 
-    await _send("intelligence-feed", _embed(
+    await _send("market-pulse", _embed(
         f"**Volume Spike — {coin_full}**\n"
         f"Money flowing in fast — volume jumped **{mult:.1f}×** this window.\n"
         f"Was: ${prev_volume:,.0f} → Now: **${snap['volume']:,.0f}**\n"
@@ -1252,7 +1173,7 @@ async def notify_intelligence_new_market(snap: dict) -> None:
     crowd_read = _crowd_direction(snap["yes_price"])
     direction_word = "UP" if snap["yes_price"] > 0.60 else "DOWN" if snap["yes_price"] < 0.40 else "NEITHER WAY"
 
-    await _send("intelligence-feed", _embed(
+    await _send("market-pulse", _embed(
         f"**New Window — {coin_full}**\n"
         f"{close_line} ${snap['volume']:,.0f} already traded.\n"
         f"Crowd is pricing {coin_full} {direction_word} ({crowd_pct}% chance it goes up).\n"
@@ -1277,8 +1198,8 @@ async def notify_intelligence_high_conviction(snap: dict) -> None:
         rarity_line = f"Pricing: {crowd_pct}% chance of going up | Volume: ${snap['volume']:,.0f}"
         color = COLOR_RED
 
-    await _send("high-conviction", _embed(
-        f"**Strong Signal — {coin_full}**\n"
+    await _send("market-pulse", _embed(
+        f"**⚡ HIGH CONVICTION — {coin_full}**\n"
         f"Crowd is extremely confident {coin_full} goes {direction} this window.\n"
         f"{rarity_line}\n"
         f"This level of certainty is rare in 15-minute markets.",
@@ -1296,7 +1217,7 @@ async def notify_intelligence_summary(
         live_prices = {}
 
     if not markets:
-        await _send("intelligence-feed", _embed(
+        await _send("market-pulse", _embed(
             "**Market Snapshot** — No active 15-minute markets right now.",
             COLOR_GRAY,
             footer=f"intelligence · {_now_et()}",
@@ -1318,7 +1239,7 @@ async def notify_intelligence_summary(
         else:
             lines.append(f"{coin_full} — {crowd_read} ({crowd_pct}% up) | {vol_str} traded")
 
-    await _send("intelligence-feed", _embed(
+    await _send("market-pulse", _embed(
         "\n".join(lines),
         COLOR_BLUE,
         footer=f"intelligence · {_now_et()}",
@@ -1338,13 +1259,13 @@ async def notify_daily_calendar_alert(alert: str) -> None:
 
 
 async def notify_market_open(content: str) -> None:
-    """Post the 9:30am market open snapshot to #market-open."""
-    await _send("market-open", {"content": content, "username": KAL})
+    """Post the 9:30am market open snapshot to #market-pulse."""
+    await _send("market-pulse", {"content": content, "username": KAL})
 
 
 async def notify_market_close(content: str) -> None:
-    """Post the 4:00pm market close reflection to #market-close."""
-    await _send("market-close", {"content": content, "username": KAL})
+    """Post the 4:00pm market close reflection to #market-pulse."""
+    await _send("market-pulse", {"content": content, "username": KAL})
 
 
 async def notify_idea(idea_text: str) -> None:
@@ -1358,7 +1279,7 @@ async def send_channel_guide() -> None:
 
     When DISCORD_BOT_TOKEN is set:
       1. Update bot profile to username "Kal" with the green logo avatar
-      2. Find or create all 7 categories and 19 sub-channels
+      2. Find or create all 6 categories and 10 sub-channels
       3. Post guide cards to any channel that doesn't have one yet (idempotent)
       4. Pin each guide card (best-effort)
       5. Cache channel IDs so all future _send() calls go through the bot
@@ -1370,34 +1291,24 @@ async def send_channel_guide() -> None:
 
     token = getattr(settings, "discord_bot_token", "")
 
-    # Full guide map — all 19 channels
+    # Full guide map — all 10 channels
     guides = {
         # 🧠 INTELLIGENCE
-        "morning-brief":       _GUIDE_MORNING_BRIEF,
-        "breaking-news":       _GUIDE_BREAKING_NEWS,
-        "big-money":           _GUIDE_BIG_MONEY,
-        "thesis":              _GUIDE_THESIS,
-        # 📅 CALENDAR
-        "economic-calendar":   _GUIDE_ECONOMIC_CALENDAR,
-        # 🔄 DAILY ROUTINE
-        "market-open":         _GUIDE_MARKET_OPEN,
-        "market-close":        _GUIDE_MARKET_CLOSE,
-        "ideas":               _GUIDE_IDEAS,
-        # 📊 MARKETS
-        "trades":              _GUIDE_TRADES,
-        "watchlist":           _GUIDE_WATCHLIST,
-        "weekly-analysis":     _GUIDE_WEEKLY,
-        # 📈 ASSET CLASSES
-        "crypto":              _GUIDE_CRYPTO,
-        "stocks":              _GUIDE_STOCKS,
-        "prediction-markets":  _GUIDE_PREDICTION_MARKETS,
-        "commodities":         _GUIDE_COMMODITIES,
-        # 🚨 SIGNALS
-        "high-conviction":     _GUIDE_HIGH_CONVICTION,
-        "intelligence-feed":   _GUIDE_INTELLIGENCE_FEED,
+        "morning-brief":      _GUIDE_MORNING_BRIEF,
+        "breaking-news":      _GUIDE_BREAKING_NEWS,
+        # 📊 TRADING
+        "trades":             _GUIDE_TRADES,
+        "trade-history":      _GUIDE_TRADE_HISTORY,
+        # 🔄 DAILY PULSE
+        "market-pulse":       _GUIDE_MARKET_PULSE,
+        # 📅 RESEARCH
+        "thesis":             _GUIDE_THESIS,
+        "economic-calendar":  _GUIDE_ECONOMIC_CALENDAR,
+        # 💡 IDEAS
+        "ideas":              _GUIDE_IDEAS,
         # ⚙️ SYSTEM
-        "summary":             _GUIDE_SUMMARY,
-        "alerts":              _GUIDE_ALERTS,
+        "summary":            _GUIDE_SUMMARY,
+        "alerts":             _GUIDE_ALERTS,
     }
 
     if token:

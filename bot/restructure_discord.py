@@ -2,10 +2,15 @@
 restructure_discord.py -- One-time Discord server migration script.
 
 What this does:
-  1. Creates all 7 categories and 19 channels (idempotent -- skips existing)
+  1. Creates all 6 categories and 10 channels (idempotent -- skips existing)
   2. Posts and pins guide cards to each new channel
   3. Makes #ideas private (deny @everyone VIEW_CHANNEL)
-  4. Deletes the old #analysis and #intelligence channels
+  4. Deletes the 11 old channels that were consolidated
+
+Channels deleted:
+  big-money, crypto, intelligence-feed, stocks, prediction-markets,
+  commodities, high-conviction, watchlist, weekly-analysis,
+  market-open, market-close
 
 Run once after updating discord_notifier.py and discord_bot.py:
   cd C:\\Users\\andre\\Desktop\\kalshi-bot\\bot
@@ -34,7 +39,18 @@ if hasattr(sys.stdout, "reconfigure"):
 else:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-OLD_CHANNELS_TO_DELETE = ["analysis", "intelligence"]
+OLD_CHANNELS_TO_DELETE = [
+    # Previous legacy
+    "analysis", "intelligence",
+    # Consolidated into #morning-brief / #thesis
+    "big-money",
+    # Consolidated into #market-pulse
+    "crypto", "intelligence-feed", "market-open", "market-close",
+    # Consolidated into #thesis
+    "stocks", "prediction-markets", "commodities", "watchlist", "weekly-analysis",
+    # Consolidated into #market-pulse
+    "high-conviction",
+]
 
 # Timing constants
 DELAY_AFTER_CALL     = 2
@@ -191,39 +207,29 @@ async def delete_channel(bot, guild_id: int, name: str) -> None:
 async def main() -> None:
     from discord_bot import CATEGORIES, PRIVATE_CHANNELS, DiscordBot, make_kal_avatar
     from discord_notifier import (
-        _GUIDE_MORNING_BRIEF, _GUIDE_BREAKING_NEWS, _GUIDE_BIG_MONEY, _GUIDE_THESIS,
-        _GUIDE_ECONOMIC_CALENDAR, _GUIDE_MARKET_OPEN, _GUIDE_MARKET_CLOSE, _GUIDE_IDEAS,
-        _GUIDE_TRADES, _GUIDE_WATCHLIST, _GUIDE_WEEKLY,
-        _GUIDE_CRYPTO, _GUIDE_STOCKS, _GUIDE_PREDICTION_MARKETS, _GUIDE_COMMODITIES,
-        _GUIDE_HIGH_CONVICTION, _GUIDE_INTELLIGENCE_FEED,
+        _GUIDE_MORNING_BRIEF, _GUIDE_BREAKING_NEWS,
+        _GUIDE_TRADES, _GUIDE_TRADE_HISTORY,
+        _GUIDE_MARKET_PULSE,
+        _GUIDE_THESIS, _GUIDE_ECONOMIC_CALENDAR,
+        _GUIDE_IDEAS,
         _GUIDE_SUMMARY, _GUIDE_ALERTS,
     )
 
     guides = {
-        # INTELLIGENCE
+        # 🧠 INTELLIGENCE
         "morning-brief":      _GUIDE_MORNING_BRIEF,
         "breaking-news":      _GUIDE_BREAKING_NEWS,
-        "big-money":          _GUIDE_BIG_MONEY,
-        "thesis":             _GUIDE_THESIS,
-        # CALENDAR
-        "economic-calendar":  _GUIDE_ECONOMIC_CALENDAR,
-        # DAILY ROUTINE
-        "market-open":        _GUIDE_MARKET_OPEN,
-        "market-close":       _GUIDE_MARKET_CLOSE,
-        "ideas":              _GUIDE_IDEAS,
-        # MARKETS
+        # 📊 TRADING
         "trades":             _GUIDE_TRADES,
-        "watchlist":          _GUIDE_WATCHLIST,
-        "weekly-analysis":    _GUIDE_WEEKLY,
-        # ASSET CLASSES
-        "crypto":             _GUIDE_CRYPTO,
-        "stocks":             _GUIDE_STOCKS,
-        "prediction-markets": _GUIDE_PREDICTION_MARKETS,
-        "commodities":        _GUIDE_COMMODITIES,
-        # SIGNALS
-        "high-conviction":    _GUIDE_HIGH_CONVICTION,
-        "intelligence-feed":  _GUIDE_INTELLIGENCE_FEED,
-        # SYSTEM
+        "trade-history":      _GUIDE_TRADE_HISTORY,
+        # 🔄 DAILY PULSE
+        "market-pulse":       _GUIDE_MARKET_PULSE,
+        # 📅 RESEARCH
+        "thesis":             _GUIDE_THESIS,
+        "economic-calendar":  _GUIDE_ECONOMIC_CALENDAR,
+        # 💡 IDEAS
+        "ideas":              _GUIDE_IDEAS,
+        # ⚙️ SYSTEM
         "summary":            _GUIDE_SUMMARY,
         "alerts":             _GUIDE_ALERTS,
     }

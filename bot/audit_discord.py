@@ -35,20 +35,16 @@ CHANNELS = [
     # 🧠 INTELLIGENCE
     "morning-brief",
     "breaking-news",
-    "big-money",
-    "thesis",
-    # 📊 MARKETS
+    # 📊 TRADING
     "trades",
-    "watchlist",
-    "weekly-analysis",
-    # 📈 ASSET CLASSES
-    "crypto",
-    "stocks",
-    "prediction-markets",
-    "commodities",
-    # 🚨 SIGNALS
-    "high-conviction",
-    "intelligence-feed",
+    "trade-history",
+    # 🔄 DAILY PULSE
+    "market-pulse",
+    # 📅 RESEARCH
+    "thesis",
+    "economic-calendar",
+    # 💡 IDEAS
+    "ideas",
     # ⚙️ SYSTEM
     "summary",
     "alerts",
@@ -194,7 +190,7 @@ async def main() -> None:
     print()
     print("=" * 66)
     print("KAL DISCORD AUDIT")
-    print(f"Checking {len(CHANNELS)} channels — last 20 messages each")
+    print(f"Checking {len(CHANNELS)} channels (10 total) — last 20 messages each")
     print("=" * 66)
 
     try:

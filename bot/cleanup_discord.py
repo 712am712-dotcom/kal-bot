@@ -24,11 +24,19 @@ from pathlib import Path
 # any of these strings.
 
 GUIDE_FINGERPRINTS = [
+    # Current 10-channel guides
     "**Kal — #morning-brief**",
     "**Kal — #breaking-news**",
-    "**Kal — #big-money**",
-    "**Kal — #thesis**",
     "**Kal — #trades**",
+    "**Kal — #trade-history**",
+    "**Kal — #market-pulse**",
+    "**Kal — #thesis**",
+    "**Kal — #economic-calendar**",
+    "**Kal — #ideas**",
+    "**Kal — #summary**",
+    "**Kal — #alerts**",
+    # Legacy fingerprints — match old guides so they get cleaned up
+    "**Kal — #big-money**",
     "**Kal — #watchlist**",
     "**Kal — #weekly-analysis**",
     "**Kal — #crypto**",
@@ -37,9 +45,8 @@ GUIDE_FINGERPRINTS = [
     "**Kal — #commodities**",
     "**Kal — #high-conviction**",
     "**Kal — #intelligence-feed**",
-    "**Kal — #summary**",
-    "**Kal — #alerts**",
-    # Legacy fingerprints — match old guides so they get cleaned up
+    "**Kal — #market-open**",
+    "**Kal — #market-close**",
     "**Kal — Trades Channel Guide**",
     "**Kal — Analysis Channel Guide**",
     "**Kal — Summary Channel Guide**",
@@ -62,26 +69,19 @@ CHANNELS_TO_CLEAN = [
     # 🧠 INTELLIGENCE
     "morning-brief",
     "breaking-news",
-    "big-money",
-    "thesis",
-    # 📊 MARKETS
+    # 📊 TRADING
     "trades",
-    "watchlist",
-    "weekly-analysis",
-    # 📈 ASSET CLASSES
-    "crypto",
-    "stocks",
-    "prediction-markets",
-    "commodities",
-    # 🚨 SIGNALS
-    "high-conviction",
-    "intelligence-feed",
+    "trade-history",
+    # 🔄 DAILY PULSE
+    "market-pulse",
+    # 📅 RESEARCH
+    "thesis",
+    "economic-calendar",
+    # 💡 IDEAS
+    "ideas",
     # ⚙️ SYSTEM
     "summary",
     "alerts",
-    # Legacy channels — clean these out before deleting them
-    "analysis",
-    "intelligence",
 ]
 
 

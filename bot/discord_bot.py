@@ -28,15 +28,14 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://discord.com/api/v10"
 
-# 7-category structure — each tuple is (category_name, [channel_names_in_order])
+# 6-category structure — each tuple is (category_name, [channel_names_in_order])
 # private=True channels are created with @everyone view permission denied.
 CATEGORIES = [
-    ("🧠 INTELLIGENCE",  ["morning-brief", "breaking-news", "big-money", "thesis"]),
-    ("📅 CALENDAR",       ["economic-calendar"]),
-    ("🔄 DAILY ROUTINE",  ["market-open", "market-close", "ideas"]),
-    ("📊 MARKETS",        ["trades", "watchlist", "weekly-analysis"]),
-    ("📈 ASSET CLASSES",  ["crypto", "stocks", "prediction-markets", "commodities"]),
-    ("🚨 SIGNALS",        ["high-conviction", "intelligence-feed"]),
+    ("🧠 INTELLIGENCE",  ["morning-brief", "breaking-news"]),
+    ("📊 TRADING",        ["trades", "trade-history"]),
+    ("🔄 DAILY PULSE",   ["market-pulse"]),
+    ("📅 RESEARCH",       ["thesis", "economic-calendar"]),
+    ("💡 IDEAS",          ["ideas"]),
     ("⚙️ SYSTEM",         ["summary", "alerts"]),
 ]
 # Channels that should be private (deny @everyone view)
