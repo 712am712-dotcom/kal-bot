@@ -1007,14 +1007,11 @@ async def _periodic_summary_task(
             stats.reset()
             continue
 
-        # Issue 4: credit alert if markets were scanned but Claude was never called
-        # (only fire when not already in exhausted state — that's handled above)
+        # If markets were scanned but Claude was never called, log silently — do not post to Discord.
+        # The real credit-exhausted alert fires separately via notify_credits_exhausted().
         if stats.markets_scanned > 0 and stats.ai_calls == 0 and not _credits_exhausted:
-            await discord.notify_credit_alert(
-                markets_scanned=stats.markets_scanned,
-                period_hours=interval_hours,
-            )
-            log.warning("credit_alert_sent", markets_scanned=stats.markets_scanned)
+            log.warning("credit_alert_suppressed_no_ai_calls",
+                        markets_scanned=stats.markets_scanned, period_hours=interval_hours)
             stats.reset()
             continue
 
@@ -1186,10 +1183,20 @@ async def _ta_refresh_task(ta: TechnicalAnalyzer, interval_minutes: int = 15) ->
 
 
 async def _ta_summary_task(ta: TechnicalAnalyzer, interval_hours: int = 1) -> None:
-    """Post combined Market Pulse for all coins to #analysis once per hour."""
+    """Post combined Market Pulse for all coins to #market-pulse once per hour.
+    Skips posts between midnight and 6am ET — no markets open, nobody watching."""
     interval_secs = interval_hours * 3600
     while True:
         await asyncio.sleep(interval_secs)
+        # Overnight quiet window: skip Discord post midnight–6am ET
+        try:
+            from zoneinfo import ZoneInfo
+            _et_hour = datetime.datetime.now(ZoneInfo("America/New_York")).hour
+        except (ImportError, KeyError):
+            _et_hour = (datetime.datetime.utcnow() - datetime.timedelta(hours=4)).hour
+        if 0 <= _et_hour < 6:
+            log.debug("ta_summary_skipped_overnight", et_hour=_et_hour)
+            continue
         if ta.cache_age_minutes > 90:
             log.debug("ta_summary_skipped_stale_cache")
             continue
