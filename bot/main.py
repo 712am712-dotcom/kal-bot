@@ -38,9 +38,9 @@ from market_intelligence import IntelligenceScanner
 from news_intelligence import NewsIntelligence
 from order_manager import OrderManager
 from scheduled_analysis import (
-    build_daily_briefing, build_weekly_analysis, get_macro_data,
-    should_post_daily_briefing, mark_briefing_posted,
+    build_weekly_analysis, get_macro_data,
     should_post_weekly, mark_weekly_posted,
+    fetch_brief_market_data,
 )
 from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus, evaluate_axios_alert
 import email_reader as _er
@@ -1247,33 +1247,13 @@ async def _scheduled_analysis_task(
 ) -> None:
     """
     Polls every 15 minutes for scheduled events:
-    - Daily briefing at 7am ET (noon UTC)
     - Weekly analysis every Monday at 8am ET
+    (Daily briefing is handled by _gmail_brief_task — newsletter-driven, not time-driven)
     """
     while True:
         await asyncio.sleep(900)  # check every 15 minutes
         try:
-            # ── Daily briefing ─────────────────────────────────────────────
             model_ov = model_override_fn() if model_override_fn else None
-
-            if should_post_daily_briefing():
-                try:
-                    resp = await kalshi._get("/markets", params={"status": "open", "limit": 100})
-                    markets = resp.get("markets", [])
-                    macro   = await get_macro_data()
-                    ta_sums = ta._cache  # already refreshed by _ta_refresh_task
-                    content = await build_daily_briefing(
-                        crypto_prices=_price_cache,
-                        ta_summaries=ta_sums,
-                        kalshi_markets=markets,
-                        macro_data=macro,
-                        model_override=model_ov,
-                    )
-                    await discord.notify_daily_briefing(content)
-                    mark_briefing_posted()
-                    log.info("daily_briefing_posted")
-                except Exception as exc:
-                    log.warning("daily_briefing_failed", error=str(exc))
 
             # ── Weekly analysis ────────────────────────────────────────────
             if should_post_weekly():
@@ -1359,7 +1339,22 @@ async def _gmail_brief_task(
 
             log.info("[brief_task] %d newsletter(s) found: %s", len(newsletters), list(newsletters.keys()))
             model_ov = model_override_fn() if model_override_fn else None
-            brief, cost = await build_morning_brief(newsletters, markets, model_override=model_ov)
+
+            # Fetch market data for the Markets section (pure data, zero Claude calls)
+            try:
+                market_data = await fetch_brief_market_data(
+                    av_key=settings.alpha_vantage_key or "",
+                    fred_api_key=settings.fred_api_key or "",
+                )
+            except Exception as _mde:
+                log.warning("[brief_task] market data fetch failed: %s", _mde)
+                market_data = {}
+
+            brief, cost = await build_morning_brief(
+                newsletters, markets,
+                market_data=market_data,
+                model_override=model_ov,
+            )
 
             await discord.notify_morning_brief(brief)
 

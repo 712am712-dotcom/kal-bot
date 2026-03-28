@@ -381,56 +381,71 @@ def _oauth2_fetch_all_sync(service: Any, senders: list[str]) -> dict[str, str]:
 # ---- Claude brief builder ----------------------------------------------------
 
 BRIEF_SYSTEM = KAL_IDENTITY + """
-Your current task: Synthesize today's financial newsletters into one sharp, connected morning brief.
-You are not summarizing — you are finding the narrative thread that connects today's news into one coherent picture.
-Write like a sharp analyst briefing another trader: direct, specific, with clear trade implications.
-Every sentence must answer "so what does this mean for my money?"
-Use analogies when they clarify — never when they're just decorative. Never use the word "significant" or "notable."
-The Big Picture section is the most important — it must make the reader feel like they understand what the market is pricing in today.
-The Trade Today is the second most important — one clear, high conviction thought.
+Your current task: Synthesize today's financial newsletters into one definitive morning brief.
+You are the last mile. After reading this brief, the reader should never need to open the originals.
+Write like a senior analyst at a top macro fund: precise, connected, no noise.
+Every sentence serves one purpose: what is happening, why it matters, and what to watch.
+Bonds and rates come first — they price everything else. Never skip yield moves or Fed commentary.
+Never miss institutional flows, M&A above $500M, or sector rotations that are in the newsletters.
+The test: if someone reads this brief and then opens the original newsletters and finds 5 things that matter that you missed — you failed.
+Broadcast voice only. Never write "we", "let's build", "Day 1", or any motivational language.
+Never use "significant" or "notable" — name the specific thing instead.
 """
 
 BRIEF_PROMPT = """\
-Today is {date}. Below are today's financial newsletters. Read all of them,
-de-duplicate overlapping stories, and synthesize into ONE unified morning brief.
+Today is {date}. Below are today's financial newsletters. Read ALL of them carefully.
 
 {newsletter_block}
 
-TOP KALSHI MARKETS RIGHT NOW:
+---
+TOP KALSHI MARKETS:
 {kalshi_block}
 
-Produce EXACTLY this format:
+---
+Produce EXACTLY this format. Same structure every day. No extra sections. No deviations.
 
-**Morning Brief -- {date}**
-*[One sentence that connects the biggest themes of the day -- what is the story today? Not a list, one thread.]*
+**Morning Brief — {date}**
+*[One sentence — today's single narrative thread. What is the story connecting all of today's market themes? Not a list.]*
+
+**Markets**
+{markets_block}
 
 **The Big Picture**
-[2-3 sentences connecting the macro dots. What is the market actually pricing in today? What is the tension or the key question traders are asking? Write like a smart friend explaining it over coffee. Use analogies when they help -- but only good ones. Example: "The bond market is acting like a lie detector right now -- it's saying the Fed won't cut anytime soon, even as stocks are acting like everything is fine." Do NOT use the words "significant" or "notable" -- be specific instead.]
+[2-3 sentences on today's macro picture. What is the market pricing in? What is the central tension or key question for traders today?
+Bond and rate moves MUST be addressed here if yields moved or the Fed was mentioned — yields price everything else.
+Never use "significant" or "notable" — be specific. No motivational language. No first-person plural.]
 
-**What's Moving and Why**
-[3-6 bullet points. Each one MUST follow this exact structure:
-- [What happened] → [Why it matters for markets] → [Trade angle or implication, if any]
-Only include items that have a clear answer to "so what for my money?" If something has no trade implication, skip it. Do NOT use the words "significant" or "notable".]
+**What's Moving**
+[4-8 bullets covering EVERY market-moving item from ALL newsletters today. Do not leave items out.
+Format: [What happened] → [Why it matters for markets] → [Trade angle if any]
+Mandatory coverage when present in newsletters: yield/rate moves, Fed commentary, institutional flows, M&A above $500M, crypto catalysts, sector rotations, geopolitical market impact.
+The reader should never need to open an original newsletter after reading this section.]
+
+**Deal Flow**
+[3-5 most significant M&A, VC, IPO, or debt deals from today's newsletters. Only deals above $500M or genuinely market-moving smaller deals.
+Format: [Company] [agreed to/raised/priced] [deal] at $[X]B — [one line: market or sector implication]
+If fewer than 3 qualifying deals in today's newsletters, list what is there.
+If no deals at all, write exactly: "No significant deal flow in today's newsletters."]
 
 **The Trade Today**
-[Kal's single highest conviction observation from today's news. NOT a list -- one clear, direct thought. What is the single most actionable thing in today's brief? Could be a Kalshi market angle, a crypto read, a stock or sector setup, a macro theme to fade or follow. Write it like a trader talking to another trader. End with a plain English version in parentheses for context, e.g., "(In plain English: the bond market is pricing in higher rates for longer, which is bad for growth stocks and crypto)."]
-
-**Prediction Market Angles**
-[Only include if there are GENUINE Kalshi connections to today's news -- not forced. If there are real connections: name the specific Kalshi market from the list above, its current crowd price, and in one sentence why it might be wrong given today's news. If there are no high conviction Kalshi angles today, write exactly: "No high conviction Kalshi angles today." Never manufacture a connection just to fill this section.]
+[Single highest-conviction observation from today's news. One clear, direct paragraph — NOT a list.
+Name the specific asset, direction, and thesis. Make it actionable.
+End with a plain-English version in parentheses.]
 
 **Watch List**
-- [Specific thing to monitor and exactly why -- what price, event, or signal matters]
+- [Specific item: name the data point, event, or price level — and exactly what signal you are watching for]
 - [Second item, same format]
-[Optional third item only if genuinely worth watching]
-Maximum 3 items. Only things a trader would actually check during the day.
+[Optional third item only if genuinely critical — never pad]
+Maximum 3 items.
 
-Rules:
-- De-duplicate: if multiple newsletters cover the same story, combine into one bullet
-- Do NOT use the words "significant" or "notable" anywhere -- be specific
-- The Big Picture must connect at least 2-3 of today's stories into one coherent narrative
-- The Trade Today is mandatory -- there is always one most actionable thing
-- Watch List max 3 items, never pad it
-- Write like a trader briefing another trader, not like a financial newsletter
+Hard rules:
+- Include the Markets section data EXACTLY as provided above — do not alter any numbers or formatting
+- De-duplicate stories that appear across multiple newsletters — combine into one bullet
+- Never write "we", "let's", "Day 1", or any motivational language
+- Never write "significant" or "notable" — name the specific thing instead
+- Bond/rate coverage is mandatory when yields moved or the Fed was mentioned
+- Deal Flow section is mandatory — always include it even if brief
+- The reader must never need to open an original newsletter after reading this brief
 """
 
 
@@ -575,9 +590,70 @@ async def evaluate_axios_alert(
         return None, cost
 
 
+def _format_markets_block(market_data: dict) -> str:
+    """
+    Format pre-fetched market data into the Markets section lines.
+    Pure Python — zero Claude calls. Called before the Claude prompt is built.
+    """
+    equities = market_data.get("equities", {})
+    crypto   = market_data.get("crypto",   {})
+    yields   = market_data.get("yields",   {})
+
+    def _eq(sym: str, label: str) -> str:
+        d = equities.get(sym, {})
+        price = d.get("price")
+        chg_p = d.get("change_p")
+        if not price:
+            return f"{label}: N/A"
+        chg_str = f" ({chg_p:+.1f}%)" if chg_p is not None else ""
+        return f"{label}: ${price:,.2f}{chg_str}"
+
+    def _cr(sym: str) -> str:
+        d = crypto.get(sym, {})
+        price = d.get("price")
+        chg   = d.get("change_24h")
+        if not price:
+            return f"{sym}: N/A"
+        chg_str = f" ({chg:+.1f}%)" if chg is not None else ""
+        fmt = f"${price:,.0f}" if price >= 100 else f"${price:.2f}"
+        return f"{sym}: {fmt}{chg_str}"
+
+    def _co(sym: str, label: str) -> str:
+        d = equities.get(sym, {})
+        price = d.get("price")
+        chg_p = d.get("change_p")
+        if not price:
+            return f"{label}: N/A"
+        chg_str = f" ({chg_p:+.1f}%)" if chg_p is not None else ""
+        return f"{label}: ${price:.2f}{chg_str}"
+
+    y10   = yields.get("yield_10y")
+    y2    = yields.get("yield_2y")
+    curve = yields.get("yield_curve")
+
+    y10_str = f"{y10:.2f}%" if y10 is not None else "N/A"
+    y2_str  = f"{y2:.2f}%" if y2 is not None else "N/A"
+
+    if curve is not None:
+        curve_bps    = round(curve * 100)
+        curve_status = "inverted" if curve < 0 else "normal"
+        curve_str    = f"{curve_bps:+d} bps [{curve_status}]"
+    else:
+        curve_str = "N/A"
+
+    return "\n".join([
+        f"- {_eq('SPY', 'S&P 500')} | {_eq('QQQ', 'Nasdaq')} | {_eq('DIA', 'Dow')}",
+        f"- {_cr('BTC')} | {_cr('ETH')} | {_cr('SOL')}",
+        f"- {_co('GLD', 'Gold')} | {_co('USO', 'Oil')} | {_co('SLV', 'Silver')}",
+        f"- 10Y yield: {y10_str} | 2Y yield: {y2_str}",
+        f"- Yield curve (10Y-2Y): {curve_str}",
+    ])
+
+
 async def build_morning_brief(
     newsletters: dict[str, str] | str,
     kalshi_markets: list[dict],
+    market_data: dict | None = None,
     model_override: str | None = None,
 ) -> tuple[str, float]:
     """
@@ -616,17 +692,21 @@ async def build_morning_brief(
         for m in sorted_m
     ) or "No markets loaded"
 
+    # Build the Markets section from pre-fetched data (zero Claude calls for this)
+    markets_block = _format_markets_block(market_data or {})
+
     prompt = BRIEF_PROMPT.format(
         date=date_str,
         newsletter_block=newsletter_block,
         kalshi_block=kalshi_block,
+        markets_block=markets_block,
     )
 
     active_model = model_override or settings.claude_model
     client  = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=active_model,
-        max_tokens=1600,
+        max_tokens=2200,
         system=BRIEF_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )

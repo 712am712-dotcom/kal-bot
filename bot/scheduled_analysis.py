@@ -30,6 +30,7 @@ COIN_FULL  = {"BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana"}
 MACRO_SYMBOLS = {
     "SPY":  "S&P 500 ETF",
     "QQQ":  "Nasdaq ETF",
+    "DIA":  "Dow Jones ETF",
     "GLD":  "Gold ETF",
     "USO":  "Oil ETF",
     "SLV":  "Silver ETF",
@@ -336,6 +337,57 @@ async def build_weekly_analysis(
         f"P&L: ${perf_stats.get('total_pnl', 0):+.2f}"
     )
     return f"{header}\n{perf_line}\n\n{narrative}"
+
+
+# ── Morning brief market data ─────────────────────────────────────────────────
+
+async def fetch_brief_market_data(av_key: str, fred_api_key: str) -> dict:
+    """
+    Fetch all market data for the morning brief Markets section.
+    Pure data — zero Claude calls.
+
+    Returns:
+      {
+        "equities": {sym: {price, change, change_p}},   # from Alpha Vantage
+        "crypto":   {coin: {price, change_24h}},         # from Kraken
+        "yields":   {yield_10y, yield_2y, yield_curve, yield_curve_inverted, fed_funds_rate},  # from FRED
+      }
+    """
+    import asyncio
+    from market_snapshot import _fetch_kraken_prices
+    from fred_client import FredClient
+
+    fred = FredClient(fred_api_key)
+
+    # Crypto and FRED can run in parallel; AV macro uses internal cache + sequential throttle
+    crypto_task = _fetch_kraken_prices()
+    fred_task   = fred.get_all()
+    macro_task  = get_macro_data()
+
+    try:
+        crypto, fred_data, macro = await asyncio.gather(
+            crypto_task, fred_task, macro_task, return_exceptions=True
+        )
+    except Exception as exc:
+        log.warning("[brief_market] gather failed: %s", exc)
+        crypto, fred_data, macro = {}, {}, {}
+
+    # Unwrap any exceptions from gather
+    if isinstance(crypto,    Exception): crypto    = {}
+    if isinstance(fred_data, Exception): fred_data = {}
+    if isinstance(macro,     Exception): macro     = {}
+
+    yields = {
+        "yield_10y":            fred_data.get("yield_10y"),
+        "yield_2y":             fred_data.get("yield_2y"),
+        "yield_curve":          fred_data.get("yield_curve"),
+        "yield_curve_inverted": fred_data.get("yield_curve_inverted", False),
+        "fed_funds_rate":       fred_data.get("fed_funds_rate"),
+    }
+
+    log.info("[brief_market] data ready: %d equity symbols, %d crypto coins, 10y=%.2f",
+             len(macro), len(crypto), yields.get("yield_10y") or 0)
+    return {"equities": macro, "crypto": crypto, "yields": yields}
 
 
 # ── Scheduler state ───────────────────────────────────────────────────────────
