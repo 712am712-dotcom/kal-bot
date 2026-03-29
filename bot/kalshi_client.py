@@ -395,6 +395,87 @@ class KalshiClient:
 
         return results
 
+    async def get_targeted_series_markets(
+        self,
+        series_list: list[str],
+        min_volume: float = 0.0,
+        limit_per_series: int = 10,
+    ) -> list[dict]:
+        """
+        Fetch open markets for a prioritized list of series directly.
+
+        Returns markets in series_list order (preserving caller's priority),
+        sorted by volume descending within each series.
+        Uses targeted series_ticker queries — no pagination, no sports parlays.
+
+        series_list: e.g. ["KXGDP", "KXFED", "KXCPI", "KXINX"]
+        min_volume:  skip markets below this dollar volume
+        limit_per_series: max markets to fetch per series (default 10)
+        """
+        import asyncio as _asyncio
+        import structlog as _sl
+        _log = _sl.get_logger(__name__)
+
+        def _vol(m: dict) -> float:
+            fp = m.get("volume_fp")
+            return float(fp) if fp is not None else 0.0
+
+        seen: set[str] = set()
+        all_markets: list[dict] = []
+
+        for series_ticker in series_list:
+            await _asyncio.sleep(0.3)   # stay within Kalshi rate limits
+            try:
+                resp = await self._get("/markets", params={
+                    "series_ticker": series_ticker,
+                    "status":        "open",
+                    "limit":         limit_per_series,
+                })
+                markets = resp.get("markets", [])
+                # Sort by volume descending within this series
+                markets.sort(key=_vol, reverse=True)
+                added = 0
+                for m in markets:
+                    ticker = m.get("ticker", "")
+                    if not ticker or ticker in seen:
+                        continue
+                    seen.add(ticker)
+                    if _vol(m) >= min_volume:
+                        all_markets.append(m)
+                        added += 1
+                _log.debug("targeted_series_ok", series=series_ticker, found=len(markets), added=added)
+            except Exception as exc:
+                err = str(exc)
+                if "429" in err:
+                    _log.warning("targeted_series_rate_limited", series=series_ticker)
+                    await _asyncio.sleep(3.0)
+                    try:
+                        resp = await self._get("/markets", params={
+                            "series_ticker": series_ticker,
+                            "status":        "open",
+                            "limit":         limit_per_series,
+                        })
+                        markets = resp.get("markets", [])
+                        markets.sort(key=_vol, reverse=True)
+                        for m in markets:
+                            ticker = m.get("ticker", "")
+                            if ticker and ticker not in seen:
+                                seen.add(ticker)
+                                if _vol(m) >= min_volume:
+                                    all_markets.append(m)
+                    except Exception:
+                        pass
+                else:
+                    _log.warning("targeted_series_failed", series=series_ticker, error=err[:120])
+
+        _log.info(
+            "targeted_series_fetched",
+            series_queried=len(series_list),
+            markets_returned=len(all_markets),
+            min_volume=min_volume,
+        )
+        return all_markets
+
     async def get_market(self, ticker: str) -> dict:
         """GET /markets/{ticker} — single market detail."""
         resp = await self._get(f"/markets/{ticker}")

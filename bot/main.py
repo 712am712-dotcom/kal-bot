@@ -189,12 +189,68 @@ def _seconds_until_next_scan() -> float:
     return settings.scan_interval_minutes * 60
 
 
-# ── Active coins helper ───────────────────────────────────────────────────────
+# ── Active coins / series helpers ────────────────────────────────────────────
 
 def _get_active_coins() -> set[str]:
     """Return the set of coins Kal should analyze (from ACTIVE_COINS env var)."""
     raw = getattr(settings, "active_coins", "BTC,ETH,SOL")
     return {c.strip().upper() for c in raw.split(",") if c.strip()}
+
+
+def _get_active_series() -> list[str]:
+    """
+    Return the ordered list of Kalshi series to scan each cycle.
+    Order = analysis priority: first series = analyzed first.
+    Default: macro (GDP, FED, CPI) then crypto 15min then equity.
+    """
+    raw = getattr(settings, "active_series", "KXGDP,KXFED,KXCPI,KXBTC15M,KXETH15M,KXSOL15M,KXINX")
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+async def _fetch_fred_series_context(series_ids: list[str]) -> str:
+    """
+    Fetch the 4 most recent observations for FRED series and return a
+    one-line-per-series context string.  Returns "" on any error or if
+    FRED_API_KEY is not configured.
+    """
+    if not getattr(settings, "fred_api_key", ""):
+        return ""
+    parts: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for sid in series_ids:
+                try:
+                    resp = await client.get(
+                        "https://api.stlouisfed.org/fred/series/observations",
+                        params={
+                            "series_id": sid,
+                            "api_key":   settings.fred_api_key,
+                            "file_type": "json",
+                            "sort_order": "desc",
+                            "limit":      4,
+                        },
+                    )
+                    data  = resp.json()
+                    obs   = [o for o in data.get("observations", []) if o.get("value") != "."]
+                    if not obs:
+                        continue
+                    latest = obs[0]
+                    prev   = obs[1] if len(obs) > 1 else None
+                    val    = latest["value"]
+                    date   = latest["date"]
+                    trend  = ""
+                    if prev:
+                        try:
+                            delta = float(val) - float(prev["value"])
+                            trend = f" ({'+' if delta >= 0 else ''}{delta:.2f} vs prior)"
+                        except Exception:
+                            pass
+                    parts.append(f"FRED {sid}: {val}{trend} (as of {date})")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return "\n".join(parts)
 
 
 # ── Strategy routing ──────────────────────────────────────────────────────────
@@ -858,37 +914,65 @@ async def run_live_scan(
     daily_loss     = await db.get_today_loss()
     open_positions = await db.get_open_position_count()
 
-    # Fetch live prices + targeted market list
-    # ── Load today's news context once per cycle (Strategy 2 — conviction) ─────
+    # ── Load today's news + macro context once per cycle ─────────────────────
     news_context = _load_news_context()
     log.info("news_context_loaded", chars=len(news_context))
 
-    crypto_prices: dict = {}
-    # ── Fetch Strategy 1 markets: crypto 15-min ──────────────────────────────
-    crypto_markets: list[dict] = []
-    crypto_prices = await fetch_crypto_prices(window_close=_current_window_close)
-    crypto_markets = await kalshi.get_15min_markets()
-    log.info("15min_markets_fetched", count=len(crypto_markets))
-
-    if not crypto_markets and settings.paper_trading:
-        if not _no_markets_since:
-            _no_markets_since = time.monotonic()
-        log.info("no_15min_markets_available — waiting for next window")
-        return
-
-    # ── Fetch Strategy 2 markets: top event markets by volume ─────────────────
-    # Scan 5 pages (1000 markets) for non-crypto prediction markets sorted by volume.
-    # Min volume: paper=$10, live=$200 to avoid wasting calls on empty markets.
-    event_markets: list[dict] = []
+    # Pre-fetch FRED data for macro conviction markets (one call per series, cached in-loop)
+    _fred_gdp_context: str = ""
+    _fred_fed_context: str = ""
+    _fred_cpi_context: str = ""
     try:
-        event_vol_floor = settings.paper_volume_floor if settings.paper_trading else settings.min_liquidity_dollars
-        event_markets = await kalshi.get_top_event_markets(limit=20, min_volume=event_vol_floor, pages=5)
-        log.info("event_markets_fetched", count=len(event_markets))
+        _fred_gdp_context = await _fetch_fred_series_context(["GDPC1", "A191RL1Q225SBEA"])
+        _fred_fed_context = await _fetch_fred_series_context(["FEDFUNDS"])
+        _fred_cpi_context = await _fetch_fred_series_context(["CPIAUCSL", "CPILFESL"])
+        if _fred_gdp_context:
+            log.info("fred_gdp_context_loaded", data=_fred_gdp_context[:120])
     except Exception as exc:
-        log.warning("event_markets_fetch_failed", error=str(exc))
+        log.warning("fred_context_fetch_failed", error=str(exc))
 
-    # Combine: crypto first (time-sensitive), then event markets
-    markets = crypto_markets + event_markets
+    # ── Fetch live crypto prices ──────────────────────────────────────────────
+    crypto_prices: dict = {}
+    crypto_prices = await fetch_crypto_prices(window_close=_current_window_close)
+
+    # ── Fetch markets in priority order using targeted series queries ─────────
+    # Series are defined in ACTIVE_SERIES env var (ordered by analysis priority).
+    # Crypto 15min series use the dedicated get_15min_markets() which picks the
+    # soonest-closing market with >= 1 minute remaining.
+    # All other series use get_targeted_series_markets() — direct API calls,
+    # no sports parlay pagination.
+    active_series = _get_active_series()
+    _CRYPTO_15MIN_SERIES = {"KXBTC15M", "KXETH15M", "KXSOL15M"}
+
+    macro_series  = [s for s in active_series if s not in _CRYPTO_15MIN_SERIES]
+    has_crypto_15 = any(s in _CRYPTO_15MIN_SERIES for s in active_series)
+
+    vol_floor = settings.paper_volume_floor if settings.paper_trading else settings.volume_floor
+
+    # GDP, FED, CPI, INX — targeted direct queries (in priority order)
+    macro_markets: list[dict] = []
+    if macro_series:
+        try:
+            macro_markets = await kalshi.get_targeted_series_markets(
+                series_list=macro_series,
+                min_volume=vol_floor,
+                limit_per_series=15,  # fetch 15 per series — API returns in ticker order, we re-sort by volume
+            )
+            log.info("macro_markets_fetched", count=len(macro_markets), series=macro_series)
+        except Exception as exc:
+            log.warning("macro_markets_fetch_failed", error=str(exc))
+
+    # BTC/ETH/SOL 15min — soonest-closing window per coin
+    crypto_markets: list[dict] = []
+    if has_crypto_15:
+        try:
+            crypto_markets = await kalshi.get_15min_markets()
+            log.info("15min_markets_fetched", count=len(crypto_markets))
+        except Exception as exc:
+            log.warning("15min_markets_fetch_failed", error=str(exc))
+
+    # Combine in priority order: macro (GDP→FED→CPI→INX) then crypto 15min
+    markets = macro_markets + crypto_markets
 
     if not markets:
         log.warning("no_markets_found_this_cycle")
@@ -989,15 +1073,29 @@ async def run_live_scan(
             model_override = settings.claude_fallback_model if _use_fallback_model else None
 
             # Strategy 1: fast technical (crypto <2hr) — pass TA context, no news
-            # Strategy 2: conviction (event/political) — pass news context, no TA
-            ta_context_live  = _ta.get_ta_context(market_coin) if (_ta and market_coin and use_fast_technical) else ""
+            # Strategy 2: conviction (event/political) — pass news + FRED macro context
+            ta_context_live   = _ta.get_ta_context(market_coin) if (_ta and market_coin and use_fast_technical) else ""
             news_context_live = "" if use_fast_technical else news_context
+
+            # Prepend FRED data for macro conviction markets (GDP, FED, CPI)
+            if not use_fast_technical:
+                t_upper = fields["ticker"].upper()
+                fred_prefix = ""
+                if t_upper.startswith("KXGDP") and _fred_gdp_context:
+                    fred_prefix = f"── FRED MACRO DATA ──\n{_fred_gdp_context}"
+                elif t_upper.startswith("KXFED") and _fred_fed_context:
+                    fred_prefix = f"── FRED MACRO DATA ──\n{_fred_fed_context}"
+                elif t_upper.startswith("KXCPI") and _fred_cpi_context:
+                    fred_prefix = f"── FRED MACRO DATA ──\n{_fred_cpi_context}"
+                if fred_prefix:
+                    news_context_live = (fred_prefix + "\n\n" + news_context_live).strip()
 
             log.info(
                 "market_strategy_selected",
                 ticker=fields["ticker"],
                 strategy="fast_technical" if use_fast_technical else "conviction",
                 has_news=bool(news_context_live),
+                has_fred=bool(not use_fast_technical and fields["ticker"].upper()[:4] in ("KXGD", "KXFE", "KXCP")),
             )
 
             analysis = claude.analyze_market(

@@ -85,6 +85,7 @@ class Settings(BaseSettings):
 
     # ── Cost Controls ─────────────────────────────────────────────────────────
     active_coins:                  str   = Field(default="BTC,ETH,SOL", description="Comma-separated coins to analyze. Use 'BTC' to cut calls 3x.")
+    active_series:                 str   = Field(default="KXGDP,KXFED,KXCPI,KXBTC15M,KXETH15M,KXSOL15M,KXINX", description="Ordered Kalshi series to scan each cycle. Priority order matters — first = analyzed first.")
     daily_cost_limit_dollars:      float = Field(default=1.50,  description="Switch to Haiku when daily API spend hits this")
     daily_cost_warning_dollars:    float = Field(default=1.00,  description="Send #alerts warning when daily spend hits this")
     claude_fallback_model:         str   = Field(default="claude-haiku-4-5-20251001", description="Cheaper model used after daily_cost_limit is hit")
