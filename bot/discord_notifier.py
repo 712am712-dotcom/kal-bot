@@ -876,12 +876,60 @@ async def notify_breaking_news(article: dict, markets: list[dict]) -> None:
     ))
 
 
-async def notify_breaking_alert(post: str) -> None:
-    """Post a pre-formatted Axios breaking alert to #breaking-news."""
+_RSS_SOURCE_DISPLAY: dict[str, str] = {
+    "nyt business":      "New York Times",
+    "npr business":      "NPR",
+    "marketwatch":       "MarketWatch",
+    "investing.com":     "Investing.com",
+    "wsj markets":       "Wall Street Journal",
+    "dow jones markets": "Dow Jones",
+    "zerohedge":         "ZeroHedge",
+    "cointelegraph":     "CoinTelegraph",
+    "coindesk":          "CoinDesk",
+    "decrypt":           "Decrypt",
+    "kobeissi letter":   "The Kobeissi Letter",
+}
+
+_AXIOS_EMAIL_DISPLAY: dict[str, str] = {
+    "markets@axios.com": "Axios Markets",
+    "sara@axios.com":    "Axios Pro Rata",
+    "energy@axios.com":  "Axios Energy",
+    "macro@axios.com":   "Axios Macro",
+}
+
+
+def _breaking_source_label(source: str) -> str:
+    """
+    Map a raw source identifier to a human-readable label for the footer.
+    source can be:
+      - an Axios sender email  (e.g. "markets@axios.com")
+      - an RSS feed name       (e.g. "NYT Business")
+    """
+    s = source.strip().lower()
+    if s in _AXIOS_EMAIL_DISPLAY:
+        return _AXIOS_EMAIL_DISPLAY[s]
+    if s.endswith("@axios.com"):
+        return "Axios"
+    label = _RSS_SOURCE_DISPLAY.get(s)
+    if label:
+        return label
+    # Capitalise as-is for unknown sources
+    return source.strip().title() if source.strip() else "Breaking News"
+
+
+async def notify_breaking_alert(post: str, source: str = "") -> None:
+    """Post a pre-formatted breaking alert to #breaking-news.
+
+    Args:
+        post:   The formatted message body.
+        source: Raw source identifier — Axios sender email or RSS feed name.
+                Used to build the footer label.
+    """
+    label = _breaking_source_label(source) if source else "Breaking News"
     await _send("breaking-news", _embed(
         post,
         COLOR_RED,
-        footer=f"axios alert · {_now_et()}",
+        footer=f"{label} · {_now_et()}",
     ))
 
 

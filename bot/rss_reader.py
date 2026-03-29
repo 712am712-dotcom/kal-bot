@@ -503,7 +503,7 @@ Routing rules:
         post = "\n".join(lines)
 
         if channel == "breaking-news":
-            await discord.notify_breaking_alert(post)
+            await discord.notify_breaking_alert(post, source=source)
         elif channel == "market-pulse":
             await discord.notify_rss_intel(post)
 

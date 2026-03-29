@@ -1438,7 +1438,9 @@ async def _axios_alerts_task(
                         log.info("[axios-alerts] alert eval cost=$%.4f", cost)
 
                     if post:
-                        await discord.notify_breaking_alert(post)
+                        await discord.notify_breaking_alert(
+                            post, source=alert.get("from", "")
+                        )
                         if _er._breaking_date != today:
                             _er._breaking_count = 0
                             _er._breaking_date  = today
