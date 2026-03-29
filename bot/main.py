@@ -188,6 +188,48 @@ def _get_active_coins() -> set[str]:
     return {c.strip().upper() for c in raw.split(",") if c.strip()}
 
 
+# ── Strategy routing ──────────────────────────────────────────────────────────
+
+def _is_fast_technical_market(fields: dict) -> bool:
+    """
+    True for short-duration crypto markets → use Strategy 1 (pure TA, no news).
+    False for everything else → use Strategy 2 (conviction + news context).
+
+    Criteria: ticker contains a known crypto prefix AND closes in < 2 hours.
+    """
+    import datetime as _dt
+    ticker = (fields.get("ticker") or "").upper()
+    is_crypto = any(ticker.startswith(p) for p in ("KXBTC", "KXETH", "KXSOL"))
+    if not is_crypto:
+        return False
+    close_time = fields.get("close_time", "")
+    if not close_time:
+        return True  # assume fast if no close time
+    try:
+        ct = _dt.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        mins_left = (ct - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
+        return mins_left <= 120  # under 2 hours → fast technical
+    except Exception:
+        return True
+
+
+def _load_news_context() -> str:
+    """
+    Load today's intelligence context for Strategy 2 (conviction) markets.
+    Combines RSS feed context with anything available from the morning brief store.
+    Returns empty string on any error — Strategy 2 falls back to general analysis.
+    """
+    parts: list[str] = []
+    try:
+        from rss_reader import load_rss_context_for_brief
+        rss = load_rss_context_for_brief()
+        if rss and "No RSS" not in rss:
+            parts.append(rss)
+    except Exception:
+        pass
+    return "\n\n".join(parts) if parts else ""
+
+
 # ── Daily cost tracker ────────────────────────────────────────────────────────
 
 async def _record_api_cost(cost: float, is_fallback: bool, db: "DBLogger") -> None:
@@ -354,12 +396,13 @@ def extract_market_fields(market: dict) -> dict:
     yes_price = max(0.01, min(0.99, yes_price))
     no_price  = round(1.0 - yes_price, 6)
 
-    # Volume: volume_fp is a fixed-point integer (cents), divide by 100
+    # Volume: volume_fp is already in dollars (e.g. "75716.31" = $75,716).
+    # Despite the _fp suffix it is NOT a cents fixed-point value — do not divide by 100.
     volume_fp = market.get("volume_fp")
-    volume    = float(volume_fp) / 100.0 if volume_fp is not None else 0.0
+    volume    = float(volume_fp) if volume_fp is not None else 0.0
 
     oi_fp          = market.get("open_interest_fp")
-    open_interest  = float(oi_fp) / 100.0 if oi_fp is not None else 0.0
+    open_interest  = float(oi_fp) if oi_fp is not None else 0.0
 
     return {
         "market_id":     market.get("id", ""),
@@ -744,35 +787,50 @@ async def run_live_scan(
     open_positions = await db.get_open_position_count()
 
     # Fetch live prices + targeted market list
+    # ── Load today's news context once per cycle (Strategy 2 — conviction) ─────
+    news_context = _load_news_context()
+    log.info("news_context_loaded", chars=len(news_context))
+
     crypto_prices: dict = {}
-    if settings.market_focus == "crypto":
-        crypto_prices = await fetch_crypto_prices(window_close=_current_window_close)
-        markets = await kalshi.get_15min_markets()
-        log.info("15min_markets_fetched", count=len(markets))
-        if not markets:
-            if settings.paper_trading:
-                # In paper mode, skip the cycle if all 15min windows have expired
-                # rather than paginating 50k markets and hitting rate limits
-                if not _no_markets_since:
-                    _no_markets_since = time.monotonic()
-                log.info("no_15min_markets_available — waiting for next window")
-                return
-            log.warning("no_15min_markets_found — falling back to broad crypto scan")
-            try:
-                markets = await kalshi.get_crypto_markets(min_volume=settings.min_liquidity_dollars)
-            except Exception as exc:
-                log.warning("fallback_crypto_scan_failed", error=str(exc))
-                return
-    else:
-        markets = await kalshi.get_all_open_markets()
-        log.info("markets_fetched", count=len(markets))
+    # ── Fetch Strategy 1 markets: crypto 15-min ──────────────────────────────
+    crypto_markets: list[dict] = []
+    crypto_prices = await fetch_crypto_prices(window_close=_current_window_close)
+    crypto_markets = await kalshi.get_15min_markets()
+    log.info("15min_markets_fetched", count=len(crypto_markets))
+
+    if not crypto_markets and settings.paper_trading:
+        if not _no_markets_since:
+            _no_markets_since = time.monotonic()
+        log.info("no_15min_markets_available — waiting for next window")
+        return
+
+    # ── Fetch Strategy 2 markets: top event markets by volume ─────────────────
+    # Scan 5 pages (1000 markets) for non-crypto prediction markets sorted by volume.
+    # Min volume: paper=$10, live=$200 to avoid wasting calls on empty markets.
+    event_markets: list[dict] = []
+    try:
+        event_vol_floor = settings.paper_volume_floor if settings.paper_trading else settings.min_liquidity_dollars
+        event_markets = await kalshi.get_top_event_markets(limit=20, min_volume=event_vol_floor, pages=5)
+        log.info("event_markets_fetched", count=len(event_markets))
+    except Exception as exc:
+        log.warning("event_markets_fetch_failed", error=str(exc))
+
+    # Combine: crypto first (time-sensitive), then event markets
+    markets = crypto_markets + event_markets
+
+    if not markets:
+        log.warning("no_markets_found_this_cycle")
+        if not _no_markets_since:
+            _no_markets_since = time.monotonic()
+        return
+
     if period_stats:
         period_stats.markets_scanned += len(markets)
 
     # ── Window detection — detect new 15min window ───────────────────────────
     _no_markets_since = 0.0  # markets found — clear backoff state
-    if markets:
-        window_close = markets[0].get("close_time", "")
+    if crypto_markets:
+        window_close = crypto_markets[0].get("close_time", "")
         if window_close and window_close != _current_window_close:
             log.info(
                 "new_window_detected",
@@ -796,9 +854,12 @@ async def run_live_scan(
             log.debug("skip_already_analyzed_this_window", ticker=fields["ticker"])
             continue
 
-        # ── Pre-filter 1: Active coins ───────────────────────────────────────
+        # ── Strategy routing ─────────────────────────────────────────────────
+        use_fast_technical = _is_fast_technical_market(fields)
         market_coin = next((c for c in ("BTC", "ETH", "SOL") if c in fields["ticker"].upper()), None)
-        if market_coin and market_coin not in active_coins:
+
+        # ACTIVE_COINS filter only applies to crypto markets (not event/political)
+        if use_fast_technical and market_coin and market_coin not in active_coins:
             log.debug("skip_inactive_coin", ticker=fields["ticker"], coin=market_coin, active=active_coins)
             continue
 
@@ -809,22 +870,31 @@ async def run_live_scan(
             volume_skipped += 1
             continue
 
-        # ── Pre-filter 3: Price range — coin flip / already decided ──────────
+        # ── Pre-filter 3: Price range — skip true coin flips and near-certain markets ──
+        # Conviction (event) markets can trade at wider probability ranges than
+        # crypto 15min markets — e.g. "90% Trump wins" still has real edge.
         yp = fields["yes_price"]
-        if 0.44 <= yp <= 0.56:
-            log.debug("skip_coin_flip", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
-            filter_skipped += 1
-            continue
-        if yp > 0.88 or yp < 0.12:
-            log.debug("skip_market_decided", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
-            filter_skipped += 1
-            continue
-
-        # ── Pre-filter 4: Max possible edge — skip when price is near 50% ────
-        if abs(yp - 0.50) < 0.08:
-            log.debug("skip_max_edge_insufficient", ticker=fields["ticker"], distance=f"{abs(yp-0.50):.1%}")
-            filter_skipped += 1
-            continue
+        if use_fast_technical:
+            # Crypto TA: tight coin-flip and decided-market filters
+            if 0.44 <= yp <= 0.56:
+                log.debug("skip_coin_flip", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
+                filter_skipped += 1
+                continue
+            if yp > 0.88 or yp < 0.12:
+                log.debug("skip_market_decided", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
+                filter_skipped += 1
+                continue
+            # Max possible edge — skip when too close to 50%
+            if abs(yp - 0.50) < 0.08:
+                log.debug("skip_max_edge_insufficient", ticker=fields["ticker"], distance=f"{abs(yp-0.50):.1%}")
+                filter_skipped += 1
+                continue
+        else:
+            # Event/conviction: only skip extreme certainties (99% or 1%)
+            if yp >= 0.99 or yp <= 0.01:
+                log.debug("skip_fully_decided", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
+                filter_skipped += 1
+                continue
 
         # Skip ALL Claude calls while credits are exhausted — main loop will sleep 30 min
         if _credits_exhausted:
@@ -840,7 +910,18 @@ async def run_live_scan(
             # Use fallback (Haiku) model when daily cost limit has been reached
             model_override = settings.claude_fallback_model if _use_fallback_model else None
 
-            ta_context = _ta.get_ta_context(market_coin) if (_ta and market_coin) else ""
+            # Strategy 1: fast technical (crypto <2hr) — pass TA context, no news
+            # Strategy 2: conviction (event/political) — pass news context, no TA
+            ta_context_live  = _ta.get_ta_context(market_coin) if (_ta and market_coin and use_fast_technical) else ""
+            news_context_live = "" if use_fast_technical else news_context
+
+            log.info(
+                "market_strategy_selected",
+                ticker=fields["ticker"],
+                strategy="fast_technical" if use_fast_technical else "conviction",
+                has_news=bool(news_context_live),
+            )
+
             analysis = claude.analyze_market(
                 market_id=fields["market_id"],
                 ticker=fields["ticker"],
@@ -850,9 +931,10 @@ async def run_live_scan(
                 no_price=fields["no_price"],
                 volume=fields["volume"],
                 close_time=fields["close_time"],
-                crypto_prices=crypto_prices or None,
+                crypto_prices=crypto_prices if use_fast_technical else None,
                 model_override=model_override,
-                ta_context=ta_context,
+                ta_context=ta_context_live,
+                news_context=news_context_live,
             )
 
             # Record API cost and check daily limits

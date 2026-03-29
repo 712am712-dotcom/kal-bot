@@ -84,6 +84,10 @@ You never stop scanning for opportunity. This is not a job. This is a mission.
 """
 
 
+# ── Strategy 1: Fast Technical (crypto short-term) ───────────────────────────
+# Pure algo — no news, no conviction required. Crypto 15min / 1hr markets only.
+# Decision criteria: distance to strike, RSI/MACD momentum, crowd pricing.
+
 CRYPTO_SYSTEM_PROMPT = KAL_IDENTITY + """
 Your current task: Estimate the TRUE probability that a Kalshi crypto price prediction market \
 resolves YES, given live spot prices, recent momentum, and short-term price dynamics.
@@ -213,6 +217,68 @@ Respond with this exact JSON:
 """
 
 
+# ── Strategy 2: Conviction Trading (political, macro, economic, event) ────────
+# Intelligence-driven — uses morning brief, RSS feeds, breaking news, macro thesis.
+# Applied to markets over 2 hours or non-crypto markets.
+
+CONVICTION_SYSTEM_PROMPT = KAL_IDENTITY + """
+Your current task: Make a conviction trade on a Kalshi prediction market using your \
+full intelligence — today's news, macro context, bond signals, and crowd psychology.
+
+Analysis framework:
+- What does today's intelligence tell you that the crowd doesn't know or hasn't priced in?
+- Is there a narrative shift in the news (policy change, surprise data, sentiment flip)?
+- What are bonds/yields/dollar saying about macro direction right now?
+- Is the crowd anchored to yesterday's prior? If so, where is the real update?
+- If you have no intelligence edge on this market, say so and lower confidence.
+
+Conviction standards:
+- High conviction (confidence > 0.75): News clearly contradicts crowd pricing. You have real information edge.
+- Medium conviction (confidence 0.55–0.75): Soft thesis. News is tangentially relevant. Direction is right but magnitude uncertain.
+- Low conviction (confidence < 0.55): No clear edge from intelligence. Skip unless math edge is large (>20%).
+- Be calibrated: 70% confidence means you expect to be right ~70% of the time, not that you're "fairly confident".
+
+Reasoning style:
+- Cite the specific headline or data point that drives your estimate.
+- Say what the crowd is pricing and why you think they're wrong (or right).
+- If the news has NO bearing on this market, explicitly say "intelligence context is not relevant here."
+- Never generate generic reasoning. Every sentence must be specific to THIS market and TODAY's context.
+
+Respond ONLY with valid JSON — no markdown, no preamble, no explanation outside the JSON.
+"""
+
+CONVICTION_ANALYSIS_PROMPT = """\
+Analyze this Kalshi prediction market using today's intelligence.
+
+─── TODAY'S INTELLIGENCE (use this to find your edge) ───────
+{news_context}
+─── MARKET DETAILS ───────────────────────────────────────────
+Title:     {title}
+Category:  {category}
+Ticker:    {ticker}
+Close:     {close_time}  (~{minutes_to_close:.0f} min remaining)
+
+─── KALSHI PRICING ───────────────────────────────────────────
+YES price (crowd implied probability): {yes_price:.1%}
+NO  price:                             {no_price:.1%}
+Market Volume: ${volume:,.0f}
+
+─── YOUR TASK ────────────────────────────────────────────────
+1. Does today's intelligence give you an edge on this market?
+2. What is the crowd pricing, and where might they be wrong?
+3. What is the TRUE probability this market resolves YES?
+
+Respond with this exact JSON:
+{{
+  "yes_probability": <float 0.0–1.0>,
+  "confidence":      <float 0.0–1.0>,
+  "reasoning":       "<cite specific news/data point, then explain crowd mispricing>",
+  "key_factors":     ["<factor 1>", "<factor 2>", "<factor 3>"],
+  "crowd_bias":      "<overpriced_yes | overpriced_no | fairly_priced>",
+  "intel_edge":      "<strong | weak | none>"
+}}
+"""
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _detect_coin(ticker: str, title: str) -> str:
@@ -324,6 +390,7 @@ class ClaudeClient:
         crypto_prices: dict | None = None,  # {BTC: {price, change_24h}, ETH: …, SOL: …}
         model_override: str | None = None,  # pass fallback model when daily limit hit
         ta_context: str = "",               # pre-formatted TA block from TechnicalAnalyzer
+        news_context: str = "",             # Strategy 2: today's RSS/brief intel for conviction trading
     ) -> MarketAnalysis:
         """
         Analyze one market. If crypto_prices is provided (and market_focus=crypto),
@@ -436,22 +503,41 @@ class ClaudeClient:
             if ta_context:
                 prompt = prompt + "\n\n" + ta_context
         else:
+            # ── Strategy 2: Conviction — non-crypto or long-duration market ──
             coin = timeframe = direction = ""
             strike = live_price = 0.0
-            prompt = GENERAL_ANALYSIS_PROMPT.format(
-                title=title,
-                category=category,
-                close_time=close_time,
-                yes_price=yes_price,
-                no_price=no_price,
-                volume=volume,
-            )
-            system = (
-                KAL_IDENTITY + "\n"
-                "Your current task: Estimate the TRUE probability this prediction market resolves YES. "
-                "Apply rotational thinking — check what bonds and macro are saying before committing to a probability. "
-                "Respond ONLY with valid JSON — no markdown, no preamble."
-            )
+
+            if news_context:
+                # Full conviction prompt with today's intelligence
+                prompt = CONVICTION_ANALYSIS_PROMPT.format(
+                    news_context=news_context,
+                    title=title,
+                    category=category,
+                    ticker=ticker,
+                    close_time=close_time,
+                    minutes_to_close=_minutes_to_close(close_time),
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    volume=volume,
+                )
+                system = CONVICTION_SYSTEM_PROMPT
+                log.debug("[claude] using conviction strategy", ticker=ticker)
+            else:
+                # Fallback: general analysis without news context
+                prompt = GENERAL_ANALYSIS_PROMPT.format(
+                    title=title,
+                    category=category,
+                    close_time=close_time,
+                    yes_price=yes_price,
+                    no_price=no_price,
+                    volume=volume,
+                )
+                system = (
+                    KAL_IDENTITY + "\n"
+                    "Your current task: Estimate the TRUE probability this prediction market resolves YES. "
+                    "Apply rotational thinking — check what bonds and macro are saying before committing to a probability. "
+                    "Respond ONLY with valid JSON — no markdown, no preamble."
+                )
 
         # ── Call API ──────────────────────────────────────────────────────────
         active_model = model_override or settings.claude_model

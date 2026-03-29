@@ -179,11 +179,13 @@ class KalshiClient:
             title    = (m.get("title")    or m.get("subtitle") or "").lower()
             category = (m.get("category") or "").lower()
 
-            # Correct Kalshi v2 field names:
-            #   volume_fp       — fixed-point volume (divide by 100 for dollars)
+            # Kalshi v2 field names:
+            #   volume_fp       — dollar volume as decimal string (already dollars, NOT cents)
             #   yes_ask_dollars — YES ask price as a decimal fraction (0.0–1.0)
+            # NOTE: despite the _fp suffix, volume_fp is already in dollars (e.g. "75716.31" = $75,716).
+            # Do NOT divide by 100 — that was a bug that gave $757 instead of $75,716.
             volume_fp   = m.get("volume_fp")
-            volume      = float(volume_fp) / 100.0 if volume_fp is not None else 0.0
+            volume      = float(volume_fp) if volume_fp is not None else 0.0
 
             yes_ask_raw   = m.get("yes_ask_dollars")
             yes_ask_known = yes_ask_raw is not None
@@ -227,6 +229,60 @@ class KalshiClient:
         )
 
         return results
+
+    async def get_top_event_markets(
+        self,
+        limit: int = 30,
+        min_volume: float = 0.0,
+        pages: int = 5,
+    ) -> list[dict]:
+        """
+        Return the top non-crypto event markets sorted by volume descending.
+
+        Fetches `pages` pages (200 each) from the open-markets endpoint and picks
+        the highest-volume non-crypto results. The Kalshi API doesn't expose a
+        sort-by-volume parameter, so we paginate a sample and sort locally.
+
+        pages=5 → 1000 markets, ~2–3 API calls (with cursor pagination).
+        This is enough to reliably surface high-volume political / economic markets.
+        """
+        CRYPTO_PREFIXES = ("KXBTC", "KXETH", "KXSOL", "KXMVE")  # KXMVE = parlay/multi
+
+        all_markets: list[dict] = []
+        cursor: str | None = None
+        for _ in range(pages):
+            resp = await self.get_markets(limit=200, cursor=cursor, status="open")
+            page = resp.get("markets", [])
+            all_markets.extend(page)
+            cursor = resp.get("cursor")
+            if not cursor or not page:
+                break
+
+        # Strip crypto and parlay markets
+        event: list[dict] = []
+        for m in all_markets:
+            ticker = (m.get("ticker") or "").upper()
+            if not any(ticker.startswith(p) for p in CRYPTO_PREFIXES):
+                event.append(m)
+
+        # Sort by volume descending
+        def _vol(m: dict) -> float:
+            fp = m.get("volume_fp")
+            return float(fp) if fp is not None else 0.0
+
+        event.sort(key=_vol, reverse=True)
+
+        import structlog as _sl
+        _sl.get_logger(__name__).info(
+            "event_markets_sampled",
+            pages_fetched=min(pages, len(all_markets) // 200 + 1),
+            total_sampled=len(all_markets),
+            non_crypto=len(event),
+            returning=min(limit, len([e for e in event if _vol(e) >= min_volume])),
+            min_volume=min_volume,
+        )
+
+        return [m for m in event[:limit] if _vol(m) >= min_volume]
 
     async def get_15min_markets(self) -> list[dict]:
         """
@@ -425,7 +481,7 @@ class KalshiClient:
 
         def _vol(m: dict) -> float:
             fp = m.get("volume_fp")
-            return float(fp) / 100.0 if fp is not None else 0.0
+            return float(fp) if fp is not None else 0.0
 
         def _yes(m: dict) -> str:
             v = m.get("yes_ask_dollars")
