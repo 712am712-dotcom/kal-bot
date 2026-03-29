@@ -48,14 +48,28 @@ class DecisionEngine:
             "contracts": 0,
         }
 
+        log.info(
+            "decision_engine_start",
+            market=analysis.ticker,
+            crowd_price=f"{analysis.kalshi_yes_price:.1%}",
+            kal_estimate=f"{analysis.yes_probability:.1%}",
+            edge=f"{analysis.edge:+.1%}",
+            confidence=f"{analysis.confidence:.0%}",
+            recommendation=analysis.recommendation,
+        )
+
+        def _skip(reason: str) -> dict:
+            decision["reason"] = reason
+            log.info("decision_engine_result", market=analysis.ticker, action="SKIP", reason=reason)
+            return decision
+
         # Research mode — never place real trades
         if settings.research_mode:
-            decision["reason"] = "research_mode"
-            return decision
+            return _skip("research_mode")
 
         # Demo mode guard (extra safety)
         if settings.demo_mode:
-            log.info("demo_mode_active", ticker=analysis.ticker)
+            log.debug("demo_mode_active", ticker=analysis.ticker)
             # In demo mode we still evaluate but flag it — order_manager will simulate
 
         # Use tighter crypto thresholds when in crypto focus mode;
@@ -76,44 +90,37 @@ class DecisionEngine:
         # Require zero volume too: directional markets ("BTC price up?") have no
         # strike price but DO have real volume — they're not placeholders.
         if is_crypto and getattr(analysis, "strike_price", 0.0) == 0.0 and volume == 0:
-            decision["reason"] = "no_strike_price (placeholder market)"
-            return decision
+            return _skip("no_strike_price (placeholder market)")
 
         if analysis.kalshi_yes_price == 0.50 and volume == 0:
-            decision["reason"] = "placeholder_50_50_zero_volume"
-            return decision
+            return _skip("placeholder_50_50_zero_volume")
 
         # ── Confidence threshold ─────────────────────────────────────────────
         if analysis.confidence < min_conf:
-            decision["reason"] = f"confidence_too_low ({analysis.confidence:.0%} < {min_conf:.0%})"
-            return decision
+            return _skip(f"confidence_too_low ({analysis.confidence:.0%} < {min_conf:.0%})")
 
         # ── Edge threshold ───────────────────────────────────────────────────
         if abs(analysis.edge) < min_edge:
-            decision["reason"] = f"edge_too_small ({abs(analysis.edge):.1%} < {min_edge:.1%})"
-            return decision
+            return _skip(f"edge_too_small ({abs(analysis.edge):.1%} < {min_edge:.1%})")
 
         # ── Liquidity ────────────────────────────────────────────────────────
         if not settings.paper_trading and volume < settings.min_liquidity_dollars:
-            decision["reason"] = f"insufficient_liquidity (${volume:,.0f} < ${settings.min_liquidity_dollars:,.0f})"
-            return decision
+            return _skip(f"insufficient_liquidity (${volume:,.0f} < ${settings.min_liquidity_dollars:,.0f})")
 
         # ── Daily loss limit ─────────────────────────────────────────────────
         if self.daily_loss_dollars >= settings.daily_loss_limit_dollars:
             reason = f"daily_loss_limit_hit (${self.daily_loss_dollars:.2f} >= ${settings.daily_loss_limit_dollars:.2f})"
-            decision["reason"] = reason
             import asyncio
             asyncio.create_task(discord.notify_error(
-                context=f"Daily loss limit hit — trading halted for today",
+                context="Daily loss limit hit — trading halted for today",
                 error=reason,
                 critical=False,
             ))
-            return decision
+            return _skip(reason)
 
         # ── Max open positions ───────────────────────────────────────────────
         if self.current_positions >= settings.max_open_positions:
-            decision["reason"] = f"max_positions_reached ({self.current_positions}/{settings.max_open_positions})"
-            return decision
+            return _skip(f"max_positions_reached ({self.current_positions}/{settings.max_open_positions})")
 
         # ── Compute order parameters ─────────────────────────────────────────
         if analysis.recommendation == "BUY_YES":
@@ -123,8 +130,7 @@ class DecisionEngine:
             side = "no"
             price = 1.0 - analysis.kalshi_yes_price
         else:
-            decision["reason"] = "claude_recommended_skip"
-            return decision
+            return _skip("claude_recommended_skip")
 
         # Bet sizing: fixed at max_bet, capped so we can fill at least 1 contract
         price_cents = max(1, min(99, round(price * 100)))
@@ -139,5 +145,14 @@ class DecisionEngine:
             bet_dollars=actual_cost,
             price=price,
             contracts=contracts,
+        )
+        log.info(
+            "decision_engine_result",
+            market=analysis.ticker,
+            action="TRADE",
+            side=side,
+            contracts=contracts,
+            bet_dollars=f"${actual_cost:.2f}",
+            reason="all_checks_passed",
         )
         return decision

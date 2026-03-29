@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     crypto_min_edge: float = Field(default=0.06, description="Min edge for crypto price markets (vs 0.10 for political)")
     crypto_min_confidence: float = Field(default=0.62, description="Min confidence for crypto markets (short-term = inherently noisier)")
     # Paper trading uses looser thresholds — tracking accuracy matters more than guarding capital
-    paper_min_edge: float = Field(default=0.05, description="Min edge in paper trading mode")
-    paper_min_confidence: float = Field(default=0.35, description="Min confidence in paper trading mode")
+    paper_min_edge:       float = Field(default=0.05, description="Min edge in paper trading mode")
+    paper_min_confidence: float = Field(default=0.45, description="Min confidence in paper trading mode")
 
     # ── Risk — live mode has a stricter volume floor ──────────────────────────
     live_min_liquidity_dollars: float = Field(default=200.0, description="Live mode min volume — skip markets below this")
@@ -77,7 +77,8 @@ class Settings(BaseSettings):
     kal_gmail_app_password: str = Field(default="", description="[Legacy] Gmail App Password")
 
     # ── Volume Floor ──────────────────────────────────────────────────────────
-    volume_floor: float = Field(default=150.0, description="Skip markets below this dollar volume before calling Claude")
+    volume_floor:       float = Field(default=150.0, description="Live mode: skip markets below this dollar volume before calling Claude")
+    paper_volume_floor: float = Field(default=10.0,  description="Paper mode: lower volume floor — overnight BTC markets often have $10-50 volume")
 
     # ── Intelligence Scanner ──────────────────────────────────────────────────
     intelligence_scan_interval: int = Field(default=30, description="Intelligence scanner interval in minutes")

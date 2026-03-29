@@ -802,9 +802,10 @@ async def run_live_scan(
             log.debug("skip_inactive_coin", ticker=fields["ticker"], coin=market_coin, active=active_coins)
             continue
 
-        # ── Pre-filter 2: Volume — configurable floor before calling Claude ────
-        if fields["volume"] < settings.volume_floor:
-            log.debug("skip_low_volume", ticker=fields["ticker"], volume=f"${fields['volume']:.0f}", floor=settings.volume_floor)
+        # ── Pre-filter 2: Volume — use lower floor in paper mode ────────────────
+        _vol_floor = settings.paper_volume_floor if settings.paper_trading else settings.volume_floor
+        if fields["volume"] < _vol_floor:
+            log.debug("skip_low_volume", ticker=fields["ticker"], volume=f"${fields['volume']:.0f}", floor=_vol_floor)
             volume_skipped += 1
             continue
 
@@ -1524,6 +1525,37 @@ async def _intelligence_scan_task(
             log.warning("intelligence_scan_failed", error=str(exc))
 
 
+# ── Startup credit probe ──────────────────────────────────────────────────────
+
+async def _startup_credit_check() -> None:
+    """
+    Probe the Anthropic API once at startup to confirm credits are available.
+    Clears _credits_exhausted if the call succeeds (fixes stale flag from prior run).
+    Posts to #alerts and sets _credits_exhausted=True if credits are actually gone.
+    """
+    global _credits_exhausted, _credit_error_active
+    import anthropic as _anthro
+    try:
+        client = _anthro.Anthropic(api_key=settings.anthropic_api_key)
+        client.messages.create(
+            model=settings.claude_model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        _credits_exhausted   = False
+        _credit_error_active = False
+        log.info("credits_confirmed_available")
+    except Exception as exc:
+        if _is_credit_error(exc):
+            _credits_exhausted   = True
+            _credit_error_active = True
+            log.warning("credits_exhausted_on_startup", error=str(exc))
+            await discord.notify_credits_exhausted()
+        else:
+            # Network error, timeout, etc. — don't mark exhausted, just log
+            log.warning("startup_credit_check_failed", error=str(exc))
+
+
 # ── Credit check task ────────────────────────────────────────────────────────
 
 async def _credit_check_task() -> None:
@@ -1754,6 +1786,9 @@ async def main_async() -> None:
     await discord.notify_bot_started(mode=mode, demo=settings.demo_mode)
     await discord.send_channel_guide()
     journal_mod.log_session_start(mode=mode, demo=settings.demo_mode)
+
+    # ── Startup credit probe — ensures _credits_exhausted reflects reality ─────
+    await _startup_credit_check()
 
     try:
         intel_interval = getattr(settings, "intelligence_scan_interval", 30)

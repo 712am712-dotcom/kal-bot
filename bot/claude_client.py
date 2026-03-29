@@ -457,14 +457,27 @@ class ClaudeClient:
         active_model = model_override or settings.claude_model
         start  = time.monotonic()
         client = self._get_client()
-        log.debug(f"[claude] {ticker} | yes={yes_price:.1%} | coin={coin or 'N/A'} | tf={timeframe or 'N/A'} | model={active_model}")
-        message = client.messages.create(
+        log.info(
+            "claude_api_call_attempt",
+            market=ticker,
             model=active_model,
-            max_tokens=settings.claude_max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
+            yes_price=f"{yes_price:.1%}",
+            coin=coin or "N/A",
+            timeframe=timeframe or "N/A",
         )
+        try:
+            message = client.messages.create(
+                model=active_model,
+                max_tokens=settings.claude_max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as _api_exc:
+            log.error("claude_api_call_failed", market=ticker, model=active_model, error=str(_api_exc))
+            raise
         latency_ms = int((time.monotonic() - start) * 1000)
+        log.info("claude_api_call_success", market=ticker, latency_ms=latency_ms,
+                 in_tok=message.usage.input_tokens, out_tok=message.usage.output_tokens)
 
         # ── Parse response ────────────────────────────────────────────────────
         raw = message.content[0].text.strip()
