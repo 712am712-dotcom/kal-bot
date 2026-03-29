@@ -69,6 +69,9 @@ log = structlog.get_logger(__name__)
 _current_window_close: str = ""       # close_time of the window we're currently in
 _analyzed_this_window: set[str] = set()  # tickers already processed this window
 
+# ── No-markets backoff state ───────────────────────────────────────────────────
+_no_markets_since: float = 0.0        # monotonic time when "no markets" state started
+
 # ── Kraken price cache (per-window) ──────────────────────────────────────────
 _price_cache:        dict = {}   # last successful price fetch
 _price_cache_window: str  = ""   # window close time when cache was populated
@@ -157,8 +160,12 @@ def _seconds_until_next_scan() -> float:
     Returns how many seconds to sleep before the next scan.
     If we know the current window's close_time, sleep until it closes + 20s buffer.
     Otherwise fall back to scan_interval_minutes.
+    Minimum sleep: 60s always. Extended to 300s if no-markets state has lasted > 5 min.
     """
-    global _current_window_close
+    global _current_window_close, _no_markets_since
+    # If no markets have been available for > 5 minutes, back off hard
+    if _no_markets_since and (time.monotonic() - _no_markets_since) > 300:
+        return 300.0
     if _current_window_close:
         try:
             close_dt = datetime.datetime.fromisoformat(
@@ -167,7 +174,7 @@ def _seconds_until_next_scan() -> float:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             secs_left = (close_dt - now_utc).total_seconds()
             # Sleep until window closes + 20s so markets have time to finalize
-            return max(10.0, secs_left + 20.0)
+            return max(60.0, secs_left + 20.0)
         except Exception:
             pass
     return settings.scan_interval_minutes * 60
@@ -746,6 +753,8 @@ async def run_live_scan(
             if settings.paper_trading:
                 # In paper mode, skip the cycle if all 15min windows have expired
                 # rather than paginating 50k markets and hitting rate limits
+                if not _no_markets_since:
+                    _no_markets_since = time.monotonic()
                 log.info("no_15min_markets_available — waiting for next window")
                 return
             log.warning("no_15min_markets_found — falling back to broad crypto scan")
@@ -760,7 +769,8 @@ async def run_live_scan(
     if period_stats:
         period_stats.markets_scanned += len(markets)
 
-    # ── Issue 1 & 2: Window detection — detect new 15min window ─────────────
+    # ── Window detection — detect new 15min window ───────────────────────────
+    _no_markets_since = 0.0  # markets found — clear backoff state
     if markets:
         window_close = markets[0].get("close_time", "")
         if window_close and window_close != _current_window_close:
@@ -1446,35 +1456,27 @@ async def _axios_alerts_task(
 
 async def _rss_feed_task(rss_reader: "RSSReader", model_override_fn=None) -> None:
     """
-    Poll all RSS feeds every 15 minutes (high-priority) or 60 minutes (standard).
-    Claude evaluates articles that pass keyword pre-filter.
+    Poll all RSS feeds every 15 minutes.
+    Claude evaluates articles that pass keyword pre-filter (budget: RSS_DAILY_CALL_LIMIT/day).
     Results are posted to #market-pulse and saved to rss_context_today.json for morning brief.
     """
-    high_prio_interval  = 15 * 60   # 15 minutes
-    low_prio_interval   = 60 * 60   # 60 minutes
-    _last_high_check    = 0.0
-    _last_low_check     = 0.0
+    check_interval = 15 * 60   # 15 minutes
+    _last_check    = 0.0
+    log.info("rss_feed_task_started")
 
     while True:
+        await asyncio.sleep(60)  # wake every minute, check interval above
         now = time.monotonic()
-        check_high = (now - _last_high_check) >= high_prio_interval
-        check_low  = (now - _last_low_check)  >= low_prio_interval
+        if (now - _last_check) < check_interval:
+            continue
 
-        if check_high or check_low:
-            model_ov = model_override_fn() if model_override_fn else None
-            try:
-                await rss_reader.check_all_feeds(
-                    model_override=model_ov,
-                    high_only=not check_low,
-                )
-            except Exception as exc:
-                log.warning("[rss_feed] check failed: %s", exc)
-            if check_high:
-                _last_high_check = time.monotonic()
-            if check_low:
-                _last_low_check  = time.monotonic()
-
-        await asyncio.sleep(60)  # wake every minute, check intervals above
+        model_ov = model_override_fn() if model_override_fn else None
+        try:
+            new_articles = await rss_reader.check_all_feeds(model_override=model_ov)
+            log.info("rss_feed_cycle", new_articles=new_articles)
+        except Exception as exc:
+            log.warning("[rss_feed] check failed: %s", exc)
+        _last_check = time.monotonic()
 
 
 # ── Market Intelligence task ──────────────────────────────────────────────────
@@ -1558,8 +1560,8 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
       - Weekday 7am ET (12:00 UTC): post daily alert to #morning-brief if HIGH events today
     Checks every 5 minutes. Zero Claude calls.
     """
-    fred_key     = getattr(settings, "fred_api_key", "")
-    finnhub_key  = getattr(settings, "finnhub_api_key", "")
+    fred_key = getattr(settings, "fred_api_key", "")
+    av_key   = getattr(settings, "alpha_vantage_key", "")
 
     while True:
         await asyncio.sleep(300)  # check every 5 minutes
@@ -1572,7 +1574,7 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
                 except Exception:
                     markets = []
                 try:
-                    content = await post_weekly_calendar(finnhub_key, fred_key, markets)
+                    content = await post_weekly_calendar(fred_key, markets, av_key=av_key)
                     await discord.notify_economic_calendar_weekly(content)
                     mark_weekly_posted()
                     log.info("[calendar_task] weekly calendar posted")
@@ -1582,7 +1584,7 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
             # ── Weekday 7am daily alert ────────────────────────────────────────
             if _is_weekday_7am_et() and not daily_alert_already_posted():
                 try:
-                    alert = await get_daily_calendar_alert(finnhub_key)
+                    alert = await get_daily_calendar_alert(av_key=av_key)
                     if alert:
                         await discord.notify_daily_calendar_alert(alert)
                         log.info("[calendar_task] daily alert posted: %s", alert[:80])
@@ -1738,9 +1740,10 @@ async def main_async() -> None:
     )
     rss_reader_inst = RSSReader(
         anthropic_api_key=settings.anthropic_api_key,
+        claude_model=settings.claude_model,
         supabase_url=settings.supabase_url,
         supabase_key=settings.supabase_service_role_key,
-        daily_call_limit=getattr(settings, "rss_daily_call_limit", 10),
+        call_limit=getattr(settings, "rss_daily_call_limit", 10),
     )
     # Callable that returns the override model when daily limit is hit
     def _model_override_fn() -> str | None:

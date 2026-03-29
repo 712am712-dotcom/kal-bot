@@ -182,12 +182,12 @@ def main() -> None:
     if empty_keys:
         print(f"[--] Skipping {len(empty_keys)} empty variable(s): {', '.join(sorted(empty_keys))}")
 
-    # Print what we're about to set
+    # Print what we're about to set — always mask values (first 4 chars + ...)
     keys = sorted(env.keys())
     print(f"\nSetting {len(keys)} variables in one Railway call...\n")
     for k in keys:
-        v = env[k]
-        display = v if len(v) <= 40 else v[:12] + "..." + v[-6:]
+        v       = env[k]
+        display = (v[:4] + "...") if len(v) > 4 else "****"
         print(f"       {k:<40}  {display}")
     print()
 

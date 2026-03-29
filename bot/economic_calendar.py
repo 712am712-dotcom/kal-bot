@@ -3,10 +3,13 @@ economic_calendar.py — Economic calendar posts for Kal.
 
 Two functions:
   1. post_weekly_calendar()   — Sunday 8am ET → #economic-calendar
-  2. check_daily_calendar_alert() — Weekday 7am ET → #morning-brief if HIGH impact events today
+  2. get_daily_calendar_alert() — Weekday 7am ET → #morning-brief if HIGH impact events today
 
 Both use pure data sources — zero Claude API calls.
-Data: Finnhub economic calendar + FRED bond data.
+Data sources (all free):
+  - Forex Factory calendar API (no key required) — primary economic events
+  - Alpha Vantage EARNINGS_CALENDAR (free tier) — upcoming earnings
+  - FRED API (already configured) — bond/yield data
 
 Scheduling (called from main.py):
   Sunday 8am ET = Sunday 13:00 UTC
@@ -96,65 +99,116 @@ def _is_weekday_7am_et() -> bool:
     return now.weekday() < 5 and now.hour == 12
 
 
-# ── Finnhub helpers ───────────────────────────────────────────────────────────
+# ── Free data source helpers ──────────────────────────────────────────────────
 
-async def _fetch_finnhub_calendar(api_key: str, from_date: str, to_date: str) -> list[dict]:
-    """Fetch economic calendar from Finnhub for the given date range."""
-    if not api_key:
-        return []
-    url = "https://finnhub.io/api/v1/calendar/economic"
+_FF_THIS_WEEK = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_FF_NEXT_WEEK = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+_FF_HEADERS   = {"User-Agent": "KalBot/1.0 (market-intelligence)"}
+
+
+async def _fetch_ff_calendar(next_week: bool = False) -> list[dict]:
+    """
+    Fetch economic events from Forex Factory free calendar API.
+    Returns normalised event dicts with keys: event, country, date, time_et, impact, forecast, previous.
+    Filters to USD events only. No API key required.
+    """
+    url = _FF_NEXT_WEEK if next_week else _FF_THIS_WEEK
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.get(url, params={"from": from_date, "to": to_date, "token": api_key})
+            r = await c.get(url, headers=_FF_HEADERS)
             r.raise_for_status()
-            data = r.json()
-        events = data.get("economicCalendar", [])
-        log.info("[calendar] finnhub returned %d events", len(events))
+            raw = r.json()
+
+        events: list[dict] = []
+        for item in raw:
+            impact_raw = str(item.get("impact", "")).strip().title()
+            if impact_raw in ("Holiday", ""):
+                continue
+            impact = {"High": "HIGH", "Medium": "MEDIUM", "Low": "LOW"}.get(impact_raw, "MEDIUM")
+            country = str(item.get("country", "")).upper().strip()
+            if country not in ("USD", "US", ""):
+                continue  # US events only
+            events.append({
+                "event":    item.get("title", "Unknown"),
+                "country":  country,
+                "date":     item.get("date", ""),
+                "time_et":  item.get("time", ""),
+                "impact":   impact,
+                "forecast": item.get("forecast", ""),
+                "previous": item.get("previous", ""),
+            })
+        log.info("[calendar] forex factory %s: %d USD events",
+                 "next week" if next_week else "this week", len(events))
         return events
     except Exception as exc:
-        log.warning("[calendar] finnhub fetch failed: %s", exc)
+        log.warning("[calendar] forex factory fetch failed: %s", exc)
+        return []
+
+
+async def _fetch_av_earnings(av_key: str) -> list[dict]:
+    """
+    Fetch upcoming earnings from Alpha Vantage EARNINGS_CALENDAR (free tier, CSV).
+    Returns at most 8 upcoming events as normalised dicts.
+    """
+    if not av_key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(
+                "https://www.alphavantage.co/query",
+                params={"function": "EARNINGS_CALENDAR", "horizon": "1month", "apikey": av_key},
+            )
+            r.raise_for_status()
+        import csv, io
+        rows = list(csv.DictReader(io.StringIO(r.text)))
+        events: list[dict] = []
+        for row in rows[:8]:
+            symbol = row.get("symbol", "")
+            name   = row.get("name", symbol)
+            est    = row.get("estimate", "")
+            events.append({
+                "event":    f"Earnings: {name} ({symbol})",
+                "country":  "USD",
+                "date":     row.get("reportDate", ""),
+                "time_et":  "TBD",
+                "impact":   "MEDIUM",
+                "forecast": f"EPS est. {est}" if est else "",
+                "previous": "",
+            })
+        log.info("[calendar] av earnings: %d upcoming", len(events))
+        return events
+    except Exception as exc:
+        log.warning("[calendar] av earnings fetch failed: %s", exc)
         return []
 
 
 def _impact_label(impact: str | None) -> str:
-    """Normalize Finnhub impact string to HIGH/MEDIUM/LOW."""
+    """Normalise impact string to HIGH/MEDIUM/LOW."""
     if not impact:
         return "MEDIUM"
     s = str(impact).upper()
-    if "HIGH" in s or s == "3":
+    if "HIGH" in s:
         return "HIGH"
-    if "LOW" in s or s == "1":
+    if "LOW" in s:
         return "LOW"
     return "MEDIUM"
 
 
 def _format_event_time(event: dict) -> str:
-    """Format event time as 'Mon, Apr 7 at 8:30am ET'."""
+    """Format event time as 'Mon, Apr 7 at 8:30am ET'. Handles FF format (separate date + time_et)."""
+    date_str = event.get("date", "")
+    time_str = str(event.get("time_et", "")).strip()
+
     try:
-        raw_time = event.get("time", "")
-        if raw_time and raw_time != "0000-00-00":
-            dt = datetime.datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-            # Convert UTC to ET (approximate: UTC-4 for EDT)
-            try:
-                from zoneinfo import ZoneInfo
-                et = dt.astimezone(ZoneInfo("America/New_York"))
-            except Exception:
-                et = dt.replace(tzinfo=None) + datetime.timedelta(hours=-4)
-            day  = et.strftime("%a, %b %-d")
-            hour = et.strftime("%-I:%M%p ET").lower()
-            return f"{day} at {hour}"
+        if date_str:
+            dt  = datetime.date.fromisoformat(date_str)
+            day = dt.strftime("%a, %b %-d")
+            if time_str and time_str not in ("Tentative", "All Day", "TBD", ""):
+                return f"{day} at {time_str} ET"
+            return day
     except Exception:
         pass
-
-    # Fall back to just the date
-    raw_date = event.get("date", "")
-    if raw_date:
-        try:
-            dt = datetime.date.fromisoformat(raw_date)
-            return dt.strftime("%a, %b %-d")
-        except Exception:
-            return raw_date
-    return "TBD"
+    return date_str or "TBD"
 
 
 def _sort_impact(impact: str) -> int:
@@ -207,29 +261,32 @@ def _find_kalshi_connections(events: list[dict], kalshi_markets: list[dict]) -> 
 # ── Weekly post ───────────────────────────────────────────────────────────────
 
 async def post_weekly_calendar(
-    finnhub_api_key: str,
     fred_api_key: str,
     kalshi_markets: list[dict],
+    av_key: str = "",
 ) -> str:
     """
     Build and return the weekly economic calendar Discord message.
     Caller sends this to #economic-calendar.
     Zero Claude calls — pure data.
+    Sources: Forex Factory (free, no key) + Alpha Vantage earnings (free tier) + FRED bonds.
     """
     today     = datetime.date.today()
-    # Week starting Monday
+    # Week starting next Monday
     mon       = today + datetime.timedelta(days=(7 - today.weekday()) % 7)
     fri       = mon + datetime.timedelta(days=4)
-    from_date = mon.strftime("%Y-%m-%d")
-    to_date   = fri.strftime("%Y-%m-%d")
     date_range = f"{mon.strftime('%b %-d')}–{fri.strftime('%b %-d, %Y')}"
 
     # Fetch in parallel
     import asyncio
     fred = _get_fred(fred_api_key)
-    events_task = _fetch_finnhub_calendar(finnhub_api_key, from_date, to_date)
-    fred_task   = fred.get_all()
-    events, fred_data = await asyncio.gather(events_task, fred_task)
+    events_task   = _fetch_ff_calendar(next_week=True)
+    earnings_task = _fetch_av_earnings(av_key)
+    fred_task     = fred.get_all()
+    ff_events, av_earnings, fred_data = await asyncio.gather(
+        events_task, earnings_task, fred_task
+    )
+    events = ff_events + av_earnings
 
     # Sort and filter events
     events.sort(key=lambda e: (_sort_impact(_impact_label(e.get("impact"))), e.get("date", "")))
@@ -335,20 +392,19 @@ def _derive_week_theme(fred_data: dict, high_events: list[dict]) -> str:
 
 # ── Daily 7am alert ───────────────────────────────────────────────────────────
 
-async def get_daily_calendar_alert(finnhub_api_key: str) -> str | None:
+async def get_daily_calendar_alert(av_key: str = "") -> str | None:
     """
-    Check today's Finnhub calendar. If there are HIGH impact events, return a
-    one-line alert string for #morning-brief. Returns None if nothing significant.
+    Check today's Forex Factory calendar for HIGH impact USD events.
+    Returns a one-line alert string for #morning-brief, or None if nothing significant.
     Zero Claude calls.
     """
-    if not finnhub_api_key:
-        return None
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    today = datetime.date.today()
-    today_str = today.strftime("%Y-%m-%d")
-
-    events = await _fetch_finnhub_calendar(finnhub_api_key, today_str, today_str)
-    high   = [e for e in events if _impact_label(e.get("impact")) == "HIGH"]
+    events = await _fetch_ff_calendar(next_week=False)
+    high   = [
+        e for e in events
+        if _impact_label(e.get("impact")) == "HIGH" and e.get("date", "") == today_str
+    ]
 
     if not high:
         return None

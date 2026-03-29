@@ -544,13 +544,15 @@ Routing rules:
 
     async def check_all_feeds(
         self,
-        kalshi_markets: list[dict],
+        kalshi_markets: list[dict] | None = None,
         model_override: str | None = None,
     ) -> int:
         """
         Fetch all feeds, evaluate new high-priority articles, route output.
         Returns count of new (not-yet-seen) articles found across all feeds.
         """
+        if kalshi_markets is None:
+            kalshi_markets = []
         global _processed_urls
         _reset_daily_state()
 
