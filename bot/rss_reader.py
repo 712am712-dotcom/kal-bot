@@ -1,7 +1,7 @@
 """
 rss_reader.py — RSS feed intelligence for Kal.
 
-Checks 9 financial RSS feeds every 15 minutes during market hours (6am–8pm ET)
+Checks 11 financial RSS feeds every 15 minutes during market hours (6am–8pm ET)
 and every 60 minutes overnight. A keyword pre-filter rejects ~80%+ of articles
 without a Claude call. High-priority articles get ONE Claude call to evaluate
 market impact and routing.
@@ -38,9 +38,11 @@ log = logging.getLogger(__name__)
 # ── Feed definitions ──────────────────────────────────────────────────────────
 
 RSS_FEEDS: list[tuple[str, str]] = [
-    # Financial / Macro
-    ("Reuters Business",  "https://feeds.reuters.com/reuters/businessNews"),
-    ("Reuters Top News",  "https://feeds.reuters.com/reuters/topNews"),
+    # Financial / Macro (Reuters blocked on Railway — replaced with open alternatives)
+    ("NYT Business",      "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"),
+    ("NPR Business",      "https://feeds.npr.org/1006/rss.xml"),
+    ("MarketWatch",       "https://feeds.marketwatch.com/marketwatch/topstories/"),
+    ("Investing.com",     "https://www.investing.com/rss/news.rss"),
     ("WSJ Markets",       "https://www.wsj.com/xml/rss/3_7085.xml"),
     ("Dow Jones Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
     ("ZeroHedge",         "https://zerohedge.com/fullrss2.xml"),
