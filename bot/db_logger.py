@@ -177,10 +177,12 @@ class DBLogger:
         return abs(sum(r["pnl_dollars"] for r in rows if r["pnl_dollars"] is not None))
 
     async def get_open_position_count(self) -> int:
+        """Count REAL open positions only — excludes demo/paper trades."""
         resp = (
             self._client.table("trades")
             .select("id", count="exact")
             .in_("status", ["pending", "partial"])
+            .eq("demo_mode", False)
             .execute()
         )
         return resp.count or 0

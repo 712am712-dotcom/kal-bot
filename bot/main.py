@@ -90,6 +90,15 @@ _credit_error_active: bool = False   # credit alert already posted once
 _credits_exhausted:   bool = False   # both primary+fallback failed → 30 min pause
 _error_cooldown: dict[str, datetime.datetime] = {}  # key → last Discord post time
 
+# ── Analysis cache (cost control — Issue 5) ───────────────────────────────────
+# After analyzing a market with low confidence, cache the result for 2 hours.
+# Skip re-analysis unless crowd price moved >5% or the TTL expired.
+# This prevents burning $0.05/call re-analyzing the same dead market every 15 min.
+_analysis_cache: dict[str, dict] = {}   # ticker → {confidence, crowd_price, ts}
+_CACHE_TTL_SECS      = 7200   # 2 hours
+_CACHE_PRICE_DELTA   = 0.05   # re-analyze if crowd price moved >5%
+_LOW_CONF_THRESHOLD  = 0.40   # cache only results below this confidence
+
 _CREDIT_ERR_TEXT   = "credit balance is too low"
 _CREDIT_PAUSE_SECS = 1800  # 30 minutes between retry cycles when exhausted
 
@@ -228,6 +237,69 @@ def _load_news_context() -> str:
     except Exception:
         pass
     return "\n\n".join(parts) if parts else ""
+
+
+# ── Cost-control helpers ──────────────────────────────────────────────────────
+
+_SPORTS_SIGNALS = (
+    "NCAABB", "NCAAF", "NCAABBT",          # College sports (March Madness etc.)
+    "KXNBA", "KXNFL", "KXMLB", "KXNHL",   # Pro leagues
+    "KXSOCCER", "KXTENNIS", "KXGOLF",
+)
+_SPORTS_VOLUME_FLOOR = 50_000.0  # $50k minimum to analyze a sports market
+
+
+def _is_sports_market(ticker: str, volume: float) -> bool:
+    """
+    True for sports markets Kal should skip.
+    NCAA is always skipped — no sports data to form an edge.
+    Major pro leagues skipped unless volume > $50k (institutional signal = real edge).
+    """
+    t = ticker.upper()
+    if any(sig in t for sig in _SPORTS_SIGNALS):
+        return volume < _SPORTS_VOLUME_FLOOR
+    return False
+
+
+def _should_skip_cached(ticker: str, crowd_price: float) -> bool:
+    """
+    True if this market was recently analyzed with low confidence AND the crowd
+    price hasn't moved enough to justify re-analyzing.
+
+    Prevents burning $0.05/call on the same dead market every 15 minutes.
+    """
+    entry = _analysis_cache.get(ticker)
+    if not entry:
+        return False
+    age = time.monotonic() - entry["ts"]
+    if age > _CACHE_TTL_SECS:
+        # Cache expired — let it through
+        _analysis_cache.pop(ticker, None)
+        return False
+    if entry["confidence"] >= _LOW_CONF_THRESHOLD:
+        # High-confidence result — don't suppress re-analysis
+        return False
+    if abs(crowd_price - entry["crowd_price"]) >= _CACHE_PRICE_DELTA:
+        # Crowd price moved significantly — re-analyze
+        return False
+    remaining = int((_CACHE_TTL_SECS - age) / 60)
+    log.debug(
+        "skip_cached_low_confidence",
+        ticker=ticker,
+        cached_confidence=f"{entry['confidence']:.0%}",
+        price_delta=f"{abs(crowd_price - entry['crowd_price']):.1%}",
+        cache_expires_min=remaining,
+    )
+    return True
+
+
+def _update_analysis_cache(ticker: str, confidence: float, crowd_price: float) -> None:
+    """Store analysis result in cache. Only low-confidence results block re-analysis."""
+    _analysis_cache[ticker] = {
+        "confidence":  confidence,
+        "crowd_price": crowd_price,
+        "ts":          time.monotonic(),
+    }
 
 
 # ── Daily cost tracker ────────────────────────────────────────────────────────
@@ -870,31 +942,37 @@ async def run_live_scan(
             volume_skipped += 1
             continue
 
-        # ── Pre-filter 3: Price range — skip true coin flips and near-certain markets ──
-        # Conviction (event) markets can trade at wider probability ranges than
-        # crypto 15min markets — e.g. "90% Trump wins" still has real edge.
+        # ── Pre-filter 3: Sports markets — skip NCAA entirely, pro leagues below $50k ─
+        if _is_sports_market(fields["ticker"], fields["volume"]):
+            log.debug("skip_sports_market", ticker=fields["ticker"], volume=f"${fields['volume']:.0f}")
+            filter_skipped += 1
+            continue
+
+        # ── Pre-filter 4: Coin flip (45–55%) — no edge possible for ANY strategy ──
         yp = fields["yes_price"]
+        if 0.45 <= yp <= 0.55:
+            log.debug("skip_coin_flip", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
+            filter_skipped += 1
+            continue
+
+        # ── Pre-filter 5: Strategy-specific additional price filters ─────────────
         if use_fast_technical:
-            # Crypto TA: tight coin-flip and decided-market filters
-            if 0.44 <= yp <= 0.56:
-                log.debug("skip_coin_flip", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
-                filter_skipped += 1
-                continue
+            # Crypto TA: skip near-certain markets and near-50% (max edge too small)
             if yp > 0.88 or yp < 0.12:
                 log.debug("skip_market_decided", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
                 filter_skipped += 1
                 continue
-            # Max possible edge — skip when too close to 50%
-            if abs(yp - 0.50) < 0.08:
-                log.debug("skip_max_edge_insufficient", ticker=fields["ticker"], distance=f"{abs(yp-0.50):.1%}")
-                filter_skipped += 1
-                continue
         else:
-            # Event/conviction: only skip extreme certainties (99% or 1%)
-            if yp >= 0.99 or yp <= 0.01:
+            # Event/conviction: only skip true certainties (98%+ or 2%-)
+            if yp >= 0.98 or yp <= 0.02:
                 log.debug("skip_fully_decided", ticker=fields["ticker"], yes_price=f"{yp:.1%}")
                 filter_skipped += 1
                 continue
+
+        # ── Pre-filter 6: Analysis cache — skip recent low-confidence results ─────
+        if _should_skip_cached(fields["ticker"], yp):
+            filter_skipped += 1
+            continue
 
         # Skip ALL Claude calls while credits are exhausted — main loop will sleep 30 min
         if _credits_exhausted:
@@ -935,6 +1013,14 @@ async def run_live_scan(
                 model_override=model_override,
                 ta_context=ta_context_live,
                 news_context=news_context_live,
+            )
+
+            # Cache result — prevents re-analyzing this market every 15 min when
+            # confidence is low and the crowd price hasn't changed.
+            _update_analysis_cache(
+                ticker=fields["ticker"],
+                confidence=analysis.confidence,
+                crowd_price=fields["yes_price"],
             )
 
             # Record API cost and check daily limits

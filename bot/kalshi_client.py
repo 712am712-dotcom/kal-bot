@@ -237,16 +237,50 @@ class KalshiClient:
         pages: int = 5,
     ) -> list[dict]:
         """
-        Return the top non-crypto event markets sorted by volume descending.
+        Return the top non-crypto event markets, sorted by category priority then volume.
 
-        Fetches `pages` pages (200 each) from the open-markets endpoint and picks
-        the highest-volume non-crypto results. The Kalshi API doesn't expose a
-        sort-by-volume parameter, so we paginate a sample and sort locally.
+        Category priority: economics > finance > politics > other > sports
+        Sports markets are excluded unless volume > $50,000 (institutional signal).
 
-        pages=5 → 1000 markets, ~2–3 API calls (with cursor pagination).
-        This is enough to reliably surface high-volume political / economic markets.
+        Fetches `pages` pages (200 each). pages=5 → 1000 markets sampled.
         """
-        CRYPTO_PREFIXES = ("KXBTC", "KXETH", "KXSOL", "KXMVE")  # KXMVE = parlay/multi
+        # Ticker prefixes to always exclude
+        EXCLUDE_PREFIXES = (
+            "KXBTC", "KXETH", "KXSOL",   # crypto (handled separately)
+            "KXMVE",                        # parlays/multi-event combos
+        )
+        # Sports ticker signals — skip unless volume is very high
+        SPORTS_SIGNALS = (
+            "NCAABB", "NCAAF", "NCAABBT",  # March Madness / college sports
+            "KXNBA", "KXNFL", "KXMLB", "KXNHL",  # major pro leagues
+            "KXSOCCER", "KXTENNIS", "KXGOLF",
+        )
+        SPORTS_VOLUME_FLOOR = 50_000.0  # require $50k for any sports market
+
+        # Category priority: lower = analyzed first (better edge potential)
+        _CAT_PRIORITY: dict[str, int] = {
+            "economics": 0, "economic": 0, "macro": 0, "fed": 0,
+            "finance":   1, "financial": 1, "earnings": 1,
+            "politics":  2, "political": 2, "election": 2, "policy": 2,
+            "crypto":    3,
+        }
+
+        def _cat_priority(m: dict) -> int:
+            cat = (m.get("category") or "").lower()
+            for key, val in _CAT_PRIORITY.items():
+                if key in cat:
+                    return val
+            return 4  # unknown / other
+
+        def _vol(m: dict) -> float:
+            fp = m.get("volume_fp")
+            return float(fp) if fp is not None else 0.0
+
+        def _is_sports(ticker: str, volume: float) -> bool:
+            t = ticker.upper()
+            if any(sig in t for sig in SPORTS_SIGNALS):
+                return volume < SPORTS_VOLUME_FLOOR
+            return False
 
         all_markets: list[dict] = []
         cursor: str | None = None
@@ -258,31 +292,38 @@ class KalshiClient:
             if not cursor or not page:
                 break
 
-        # Strip crypto and parlay markets
+        n_sports_skipped = 0
         event: list[dict] = []
         for m in all_markets:
             ticker = (m.get("ticker") or "").upper()
-            if not any(ticker.startswith(p) for p in CRYPTO_PREFIXES):
-                event.append(m)
+            vol    = _vol(m)
 
-        # Sort by volume descending
-        def _vol(m: dict) -> float:
-            fp = m.get("volume_fp")
-            return float(fp) if fp is not None else 0.0
+            # Skip crypto and parlay tickers
+            if any(ticker.startswith(p) for p in EXCLUDE_PREFIXES):
+                continue
 
-        event.sort(key=_vol, reverse=True)
+            # Skip sports markets without institutional volume
+            if _is_sports(ticker, vol):
+                n_sports_skipped += 1
+                continue
+
+            event.append(m)
+
+        # Sort: category priority first (economics before politics before sports),
+        # then volume descending within each tier
+        event.sort(key=lambda m: (_cat_priority(m), -_vol(m)))
 
         import structlog as _sl
         _sl.get_logger(__name__).info(
             "event_markets_sampled",
-            pages_fetched=min(pages, len(all_markets) // 200 + 1),
             total_sampled=len(all_markets),
+            sports_excluded=n_sports_skipped,
             non_crypto=len(event),
-            returning=min(limit, len([e for e in event if _vol(e) >= min_volume])),
+            returning=min(limit, sum(1 for e in event if _vol(e) >= min_volume)),
             min_volume=min_volume,
         )
 
-        return [m for m in event[:limit] if _vol(m) >= min_volume]
+        return [m for m in event if _vol(m) >= min_volume][:limit]
 
     async def get_15min_markets(self) -> list[dict]:
         """

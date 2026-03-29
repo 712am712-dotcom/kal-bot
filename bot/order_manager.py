@@ -143,12 +143,18 @@ class OrderManager:
 
     async def cancel_stale_orders(self, max_age_hours: int = 24) -> None:
         """Cancel unfilled orders older than max_age_hours."""
-        import datetime
         try:
             stale = await self.db.get_stale_orders(max_age_hours=max_age_hours)
             for row in stale:
                 order_id = row["order_id"]
-                if order_id and not order_id.startswith("demo-"):
+                if not order_id:
+                    continue
+                if order_id.startswith("demo-"):
+                    # Paper/demo trades don't have real Kalshi orders — just expire them
+                    # so they don't accumulate as "open positions" forever.
+                    await self.db.update_trade_status(order_id=order_id, status="cancelled")
+                    log.info("expired_demo_trade", order_id=order_id)
+                else:
                     await self.kalshi.cancel_order(order_id)
                     await self.db.update_trade_status(order_id=order_id, status="cancelled")
                     log.info("cancelled_stale_order", order_id=order_id)
