@@ -398,6 +398,10 @@ Today is {date}. Below are today's financial newsletters. Read ALL of them caref
 {newsletter_block}
 
 ---
+RSS INTELLIGENCE (live feeds — use to supplement newsletters, not replace them):
+{rss_context_block}
+
+---
 TOP KALSHI MARKETS:
 {kalshi_block}
 
@@ -695,11 +699,19 @@ async def build_morning_brief(
     # Build the Markets section from pre-fetched data (zero Claude calls for this)
     markets_block = _format_markets_block(market_data or {})
 
+    # Load RSS context (today's evaluated articles — zero extra Claude calls)
+    try:
+        from rss_reader import load_rss_context_for_brief
+        rss_context_block = load_rss_context_for_brief()
+    except Exception:
+        rss_context_block = "No RSS data available today."
+
     prompt = BRIEF_PROMPT.format(
         date=date_str,
         newsletter_block=newsletter_block,
         kalshi_block=kalshi_block,
         markets_block=markets_block,
+        rss_context_block=rss_context_block,
     )
 
     active_model = model_override or settings.claude_model

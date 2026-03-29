@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     daily_cost_limit_dollars:      float = Field(default=1.50,  description="Switch to Haiku when daily API spend hits this")
     daily_cost_warning_dollars:    float = Field(default=1.00,  description="Send #alerts warning when daily spend hits this")
     claude_fallback_model:         str   = Field(default="claude-haiku-4-5-20251001", description="Cheaper model used after daily_cost_limit is hit")
+    rss_daily_call_limit:          int   = Field(default=10, description="Max Claude calls per day for RSS article evaluation")
 
     class Config:
         env_file = ".env"

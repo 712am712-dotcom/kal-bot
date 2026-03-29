@@ -59,6 +59,7 @@ from market_snapshot import (
     market_close_already_posted, mark_close_posted,
 )
 from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_posted_today
+from rss_reader import RSSReader
 
 log = structlog.get_logger(__name__)
 
@@ -1441,6 +1442,41 @@ async def _axios_alerts_task(
             log.warning("[axios-alerts] check failed: %s", exc)
 
 
+# ── RSS feed intelligence task ────────────────────────────────────────────────
+
+async def _rss_feed_task(rss_reader: "RSSReader", model_override_fn=None) -> None:
+    """
+    Poll all RSS feeds every 15 minutes (high-priority) or 60 minutes (standard).
+    Claude evaluates articles that pass keyword pre-filter.
+    Results are posted to #market-pulse and saved to rss_context_today.json for morning brief.
+    """
+    high_prio_interval  = 15 * 60   # 15 minutes
+    low_prio_interval   = 60 * 60   # 60 minutes
+    _last_high_check    = 0.0
+    _last_low_check     = 0.0
+
+    while True:
+        now = time.monotonic()
+        check_high = (now - _last_high_check) >= high_prio_interval
+        check_low  = (now - _last_low_check)  >= low_prio_interval
+
+        if check_high or check_low:
+            model_ov = model_override_fn() if model_override_fn else None
+            try:
+                await rss_reader.check_all_feeds(
+                    model_override=model_ov,
+                    high_only=not check_low,
+                )
+            except Exception as exc:
+                log.warning("[rss_feed] check failed: %s", exc)
+            if check_high:
+                _last_high_check = time.monotonic()
+            if check_low:
+                _last_low_check  = time.monotonic()
+
+        await asyncio.sleep(60)  # wake every minute, check intervals above
+
+
 # ── Market Intelligence task ──────────────────────────────────────────────────
 
 def _update_scanner_prices(scanner: "IntelligenceScanner") -> None:
@@ -1700,6 +1736,12 @@ async def main_async() -> None:
         imap_address=_imap_addr,
         imap_password=_imap_pass,
     )
+    rss_reader_inst = RSSReader(
+        anthropic_api_key=settings.anthropic_api_key,
+        supabase_url=settings.supabase_url,
+        supabase_key=settings.supabase_service_role_key,
+        daily_call_limit=getattr(settings, "rss_daily_call_limit", 10),
+    )
     # Callable that returns the override model when daily limit is hit
     def _model_override_fn() -> str | None:
         return settings.claude_fallback_model if _use_fallback_model else None
@@ -1743,6 +1785,9 @@ async def main_async() -> None:
             )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
+            )
+            rss_task          = asyncio.create_task(
+                _rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn)
             )
             calendar_task     = asyncio.create_task(
                 _economic_calendar_task(kalshi)
@@ -1816,6 +1861,9 @@ async def main_async() -> None:
             )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
+            )
+            rss_task          = asyncio.create_task(
+                _rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn)
             )
             calendar_task     = asyncio.create_task(
                 _economic_calendar_task(kalshi)

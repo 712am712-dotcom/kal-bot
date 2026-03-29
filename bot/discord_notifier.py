@@ -1268,6 +1268,11 @@ async def notify_market_close(content: str) -> None:
     await _send("market-pulse", {"content": content, "username": KAL})
 
 
+async def notify_rss_intel(post: str) -> None:
+    """Post an RSS intelligence item to #market-pulse (blue embed)."""
+    await _send("market-pulse", _embed(post, COLOR_BLUE), message_type="rss_intel")
+
+
 async def notify_idea(idea_text: str) -> None:
     """Post an #ideas flagging post to the private #ideas channel."""
     await _send("ideas", {"content": idea_text, "username": KAL})
