@@ -60,6 +60,7 @@ from market_snapshot import (
 )
 from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_posted_today
 from rss_reader import RSSReader
+from haiku_prefilter import HaikuPrefilter
 
 log = structlog.get_logger(__name__)
 
@@ -864,6 +865,7 @@ async def run_live_scan(
     period_stats: "_PeriodStats | None" = None,
 ) -> None:
     global _current_window_close, _analyzed_this_window, _use_fallback_model, _credits_exhausted
+    global _haiku_calls_today, _haiku_cost_today
 
     log.info("live_scan_start", demo=settings.demo_mode, focus=settings.market_focus)
 
@@ -1002,6 +1004,15 @@ async def run_live_scan(
     filter_skipped = 0
     active_coins   = _get_active_coins()
 
+    # Check watch list — promote any tickers whose crowd price moved >5%
+    # by prepending them to the front of the market list for analysis this cycle
+    if _prefilter is not None and _prefilter.watch_count > 0:
+        all_fields_for_watch = [extract_market_fields(m) for m in markets]
+        promoted = _prefilter.promote_watches(all_fields_for_watch)
+        if promoted:
+            log.info("watch_list_promotions", count=len(promoted), tickers=promoted)
+            # Promoted tickers already in markets list — promote_watches clears them from watch
+
     for market in markets:
         fields = extract_market_fields(market)
 
@@ -1061,6 +1072,36 @@ async def run_live_scan(
         # Skip ALL Claude calls while credits are exhausted — main loop will sleep 30 min
         if _credits_exhausted:
             break
+
+        # ── Pre-filter 7: Haiku pre-filter — cheap screening before Sonnet ────────
+        # Runs after all free static filters to minimize Haiku calls.
+        # SKIP → free (no Sonnet call), WATCH → added to watch list, ANALYZE → proceed.
+        if _prefilter is not None:
+            _strategy_label = "fast_technical" if use_fast_technical else "conviction"
+            _pf = _prefilter.screen(fields, strategy=_strategy_label)
+            _haiku_calls_today += 1
+            _haiku_cost_today  += _pf.cost_dollars
+            # Record haiku cost in the daily tracker (cheap — just accumulate)
+            try:
+                await _record_api_cost(_pf.cost_dollars, is_fallback=False, db=db)
+            except Exception:
+                pass
+            if _pf.verdict == "SKIP":
+                # Cache with low confidence so it stays skipped for a while
+                _update_analysis_cache(
+                    ticker=fields["ticker"],
+                    confidence=0.0,
+                    crowd_price=yp,
+                )
+                filter_skipped += 1
+                continue
+            elif _pf.verdict == "WATCH":
+                # Watch list managed inside HaikuPrefilter
+                log.debug("prefilter_watch", ticker=fields["ticker"], reason=_pf.reason)
+                filter_skipped += 1
+                continue
+            # ANALYZE — fall through to Sonnet call
+            log.debug("prefilter_analyze", ticker=fields["ticker"], reason=_pf.reason)
 
         # Mark as analyzed for this window before the Claude call so we never
         # double-call on a retry loop or exception
@@ -1240,9 +1281,13 @@ async def run_live_scan(
         trades_placed=trades_placed,
         volume_skipped=volume_skipped,
         filter_skipped=filter_skipped,
+        haiku_calls_today=_haiku_calls_today,
+        haiku_cost_today=f"${_haiku_cost_today:.4f}",
+        sonnet_calls_today=_daily_cost_calls - _haiku_calls_today,
         daily_cost=f"${_daily_cost_dollars:.4f}",
         calls_today=_daily_cost_calls,
         economy_mode=_use_fallback_model,
+        watch_list_size=_prefilter.watch_count if _prefilter else 0,
     )
 
 
@@ -1438,6 +1483,12 @@ async def _daily_performance_task(
 
 # Module-level TA instance — shared across tasks
 _ta: "TechnicalAnalyzer | None" = None
+
+# ── Haiku pre-filter singleton ────────────────────────────────────────────────
+# Created once in main_async(), shared across all scan cycles.
+_prefilter: "HaikuPrefilter | None" = None
+_haiku_calls_today:  int   = 0
+_haiku_cost_today:   float = 0.0
 
 async def _ta_refresh_task(ta: TechnicalAnalyzer, interval_minutes: int = 15) -> None:
     """Refresh Binance candles every interval_minutes. First run is immediate."""
@@ -2013,10 +2064,12 @@ async def main_async() -> None:
     except Exception as _lock_exc:
         log.warning("lock_file_failed", error=str(_lock_exc))
 
+    global _prefilter
     kalshi        = KalshiClient()
     claude        = ClaudeClient()
     db            = DBLogger()
     order_mgr     = OrderManager(kalshi=kalshi, db=db)
+    _prefilter    = HaikuPrefilter()
     tracker       = PerformanceTracker()
     period_stats  = _PeriodStats()
     intel_scanner = IntelligenceScanner(kalshi)
