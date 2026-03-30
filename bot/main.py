@@ -370,13 +370,16 @@ async def _record_api_cost(cost: float, is_fallback: bool, db: "DBLogger") -> No
     """
     global _daily_cost_dollars, _daily_cost_calls, _daily_fallback_calls
     global _daily_cost_date, _cost_warning_sent, _use_fallback_model
+    global _haiku_calls_today, _haiku_cost_today
 
     today = datetime.date.today().isoformat()
     if today != _daily_cost_date:
-        # New day — reset all counters and re-read any persisted total from DB
+        # New day — reset ALL cost counters (including Haiku) and re-read DB for today
         _daily_cost_date    = today
         _cost_warning_sent  = False
         _use_fallback_model = False
+        _haiku_calls_today  = 0
+        _haiku_cost_today   = 0.0
         try:
             stored = await db.get_config(f"daily_cost_{today}")
             _daily_cost_dollars = float(stored) if stored else 0.0
@@ -386,6 +389,7 @@ async def _record_api_cost(cost: float, is_fallback: bool, db: "DBLogger") -> No
             _daily_cost_dollars = 0.0
             _daily_cost_calls   = 0
         _daily_fallback_calls = 0
+        log.info("daily_cost_reset", date=today)
 
     _daily_cost_dollars += cost
     _daily_cost_calls   += 1
@@ -2105,6 +2109,9 @@ async def main_async() -> None:
     order_mgr     = OrderManager(kalshi=kalshi, db=db)
     _prefilter    = HaikuPrefilter()
     _vm           = VectorMemory()
+    # Eagerly connect — logs success or failure, never silently falls through
+    if _vm.startup():
+        _vm.test_connection()
     tracker       = PerformanceTracker()
     period_stats  = _PeriodStats()
     intel_scanner = IntelligenceScanner(kalshi)

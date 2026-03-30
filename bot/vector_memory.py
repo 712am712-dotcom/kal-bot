@@ -70,6 +70,58 @@ class VectorMemory:
         self._ready     = False  # True once Pinecone is initialised without error
         self._attempted = False  # Avoid repeated init attempts after failure
 
+    # ── Eager startup ─────────────────────────────────────────────────────────
+
+    def startup(self) -> bool:
+        """
+        Eagerly initialise and run a connectivity test at bot startup.
+        Logs a clear success or failure message — never silently swallowed.
+        Returns True if Pinecone is ready, False otherwise.
+        """
+        ok = self._init()
+        if not ok:
+            log.warning(
+                "vector_memory_failed",
+                error="init_failed_check_PINECONE_API_KEY",
+                using_fallback=True,
+            )
+        return ok
+
+    def test_connection(self) -> bool:
+        """
+        Store one test vector and retrieve it back to confirm end-to-end connectivity.
+        Called once at startup after _init(). Logs pass/fail explicitly.
+        Returns True if the round-trip succeeded.
+        """
+        if not self._ready:
+            return False
+        try:
+            test_text = "startup_test KXTEST vector_memory connectivity check"
+            test_vec  = self._embed(test_text)
+            test_id   = "vm_startup_test"
+
+            # Upsert
+            self._index.upsert(vectors=[{
+                "id":       test_id,
+                "values":   test_vec,
+                "metadata": {"type": "test", "timestamp": int(time.time())},
+            }])
+
+            # Query back
+            time.sleep(1)  # brief pause for Pinecone eventual consistency
+            result = self._index.query(vector=test_vec, top_k=1, include_metadata=True)
+            matches = result.get("matches", [])
+            from config import settings as _s
+            if matches and matches[0].get("id") == test_id:
+                log.info("vector_memory_test_passed", index=getattr(_s, "pinecone_index", "kal-memory"))
+                return True
+            else:
+                log.warning("vector_memory_test_failed", error="test_vector_not_found_in_query")
+                return False
+        except Exception as exc:
+            log.warning("vector_memory_test_failed", error=str(exc)[:120])
+            return False
+
     # ── Initialization ────────────────────────────────────────────────────────
 
     def _init(self) -> bool:
