@@ -391,6 +391,7 @@ class ClaudeClient:
         model_override: str | None = None,  # pass fallback model when daily limit hit
         ta_context: str = "",               # pre-formatted TA block from TechnicalAnalyzer
         news_context: str = "",             # Strategy 2: today's RSS/brief intel for conviction trading
+        memory_context: str = "",           # Vector memory: similar past patterns retrieved from Pinecone
     ) -> MarketAnalysis:
         """
         Analyze one market. If crypto_prices is provided (and market_focus=crypto),
@@ -502,6 +503,9 @@ class ClaudeClient:
             # ── Inject TA context if available ────────────────────────────
             if ta_context:
                 prompt = prompt + "\n\n" + ta_context
+            # ── Inject memory context if available ────────────────────────
+            if memory_context:
+                prompt = prompt + "\n\n" + memory_context
         else:
             # ── Strategy 2: Conviction — non-crypto or long-duration market ──
             coin = timeframe = direction = ""
@@ -538,6 +542,9 @@ class ClaudeClient:
                     "Apply rotational thinking — check what bonds and macro are saying before committing to a probability. "
                     "Respond ONLY with valid JSON — no markdown, no preamble."
                 )
+            # ── Inject memory context for conviction markets ──────────────
+            if memory_context:
+                prompt = prompt + "\n\n" + memory_context
 
         # ── Call API ──────────────────────────────────────────────────────────
         active_model = model_override or settings.claude_model

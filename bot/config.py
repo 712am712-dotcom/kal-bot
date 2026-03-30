@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     volume_floor:       float = Field(default=150.0, description="Live mode: skip markets below this dollar volume before calling Claude")
     paper_volume_floor: float = Field(default=10.0,  description="Paper mode: lower volume floor — overnight BTC markets often have $10-50 volume")
 
+    # ── Vector Memory (Pinecone) ──────────────────────────────────────────────
+    pinecone_api_key:     str = Field(default="", description="Pinecone API key — pinecone.io free tier")
+    pinecone_index:       str = Field(default="kal-memory", description="Pinecone index name")
+    pinecone_environment: str = Field(default="gcp-starter", description="Pinecone environment (deprecated in v3 — kept for compat)")
+
     # ── Intelligence Scanner ──────────────────────────────────────────────────
     intelligence_scan_interval: int = Field(default=30, description="Intelligence scanner interval in minutes")
 

@@ -18,3 +18,6 @@ finnhub-python>=2.4.18
 google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
 google-api-python-client>=2.0.0
+# Vector memory — searchable pattern library
+pinecone-client>=3.0.0
+sentence-transformers>=2.7.0

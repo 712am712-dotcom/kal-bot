@@ -61,6 +61,7 @@ from market_snapshot import (
 from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_posted_today
 from rss_reader import RSSReader
 from haiku_prefilter import HaikuPrefilter
+from vector_memory import VectorMemory
 
 log = structlog.get_logger(__name__)
 
@@ -896,6 +897,14 @@ async def run_live_scan(
                         balance=balance,
                         mode=mode_row,
                     )
+                    # Store outcome in vector memory — builds the lesson library
+                    if _vm is not None:
+                        resolved_ticker = resolved_row.get("_ticker", resolved_row.get("Ticker", "?"))
+                        _vm.store_outcome_memory(
+                            ticker=resolved_ticker,
+                            outcome="WIN" if won else "LOSS",
+                            pnl=pnl,
+                        )
                 except Exception as _exc:
                     log.warning("discord_resolve_notify_failed", error=str(_exc))
             # Issue 7: after all resolutions, send a position update
@@ -1139,6 +1148,19 @@ async def run_live_scan(
                 has_fred=bool(not use_fast_technical and fields["ticker"].upper()[:4] in ("KXGD", "KXFE", "KXCP")),
             )
 
+            # ── Fetch vector memory context before Sonnet call ────────────────
+            memory_context_live = ""
+            if _vm is not None:
+                try:
+                    memory_context_live = _vm.get_relevant_context(
+                        ticker=fields["ticker"],
+                        strategy="fast_technical" if use_fast_technical else "conviction",
+                        crowd_price=fields["yes_price"],
+                        title=fields["title"],
+                    )
+                except Exception as _vm_exc:
+                    log.debug("vector_memory_context_error", error=str(_vm_exc)[:80])
+
             analysis = claude.analyze_market(
                 market_id=fields["market_id"],
                 ticker=fields["ticker"],
@@ -1152,7 +1174,15 @@ async def run_live_scan(
                 model_override=model_override,
                 ta_context=ta_context_live,
                 news_context=news_context_live,
+                memory_context=memory_context_live,
             )
+
+            # ── Store trade decision in vector memory ─────────────────────────
+            if _vm is not None:
+                try:
+                    _vm.store_trade_memory(fields, analysis)
+                except Exception as _vm_exc:
+                    log.debug("vector_memory_store_error", error=str(_vm_exc)[:80])
 
             # Cache result — prevents re-analyzing this market every 15 min when
             # confidence is low and the crowd price hasn't changed.
@@ -1489,6 +1519,10 @@ _ta: "TechnicalAnalyzer | None" = None
 _prefilter: "HaikuPrefilter | None" = None
 _haiku_calls_today:  int   = 0
 _haiku_cost_today:   float = 0.0
+
+# ── Vector memory singleton ───────────────────────────────────────────────────
+# Lazy-initialised on first use. Gracefully no-ops when Pinecone is unavailable.
+_vm: "VectorMemory | None" = None
 
 async def _ta_refresh_task(ta: TechnicalAnalyzer, interval_minutes: int = 15) -> None:
     """Refresh Binance candles every interval_minutes. First run is immediate."""
@@ -2064,12 +2098,13 @@ async def main_async() -> None:
     except Exception as _lock_exc:
         log.warning("lock_file_failed", error=str(_lock_exc))
 
-    global _prefilter
+    global _prefilter, _vm
     kalshi        = KalshiClient()
     claude        = ClaudeClient()
     db            = DBLogger()
     order_mgr     = OrderManager(kalshi=kalshi, db=db)
     _prefilter    = HaikuPrefilter()
+    _vm           = VectorMemory()
     tracker       = PerformanceTracker()
     period_stats  = _PeriodStats()
     intel_scanner = IntelligenceScanner(kalshi)
