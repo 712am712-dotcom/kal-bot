@@ -1,12 +1,17 @@
 """
-vector_memory.py — Searchable pattern library for Kal using Pinecone + sentence-transformers.
+vector_memory.py — Searchable pattern library for Kal using Pinecone.
 
 Replaces the shallow kal_lessons.json rolling 7-day log with a persistent,
 queryable memory that compounds over time.
 
-Embedding model: all-MiniLM-L6-v2 (free, local, 384 dimensions, CPU-friendly)
-Vector store:    Pinecone free tier — index "kal-memory"
-Similarity:      cosine
+Embedding: lightweight character n-gram hashing (numpy only, no torch/ML libs).
+  - Zero extra dependencies beyond numpy (already in requirements.txt)
+  - Builds instantly on Railway — no 500MB model download
+  - Good enough for matching similar Kalshi market patterns
+  - Can be upgraded to proper embeddings later without changing the interface
+
+Vector store: Pinecone free tier — index "kal-memory", 384 dims, cosine
+Similarity:   cosine
 
 Memory categories (stored as metadata):
   type:       trade_decision | trade_outcome | market_pattern | daily_lesson
@@ -23,23 +28,21 @@ is a no-op and get_relevant_context() returns "". The trading loop never crashes
 from __future__ import annotations
 
 import hashlib
-import logging
 import time
-from typing import TYPE_CHECKING
 
-log = logging.getLogger(__name__)
+import numpy as np
+import structlog
 
-# Pinecone vector dimension for all-MiniLM-L6-v2
+log = structlog.get_logger(__name__)
+
+# Vector dimension — must match the Pinecone index
 _EMBED_DIM = 384
 
 # How many similar memories to retrieve for context injection
 _TOP_K = 4
 
 # Minimum cosine similarity to include in context (avoids noise)
-_MIN_SCORE = 0.65
-
-# Sentence-transformers model name (free, runs on CPU, ~80MB download)
-_EMBED_MODEL = "all-MiniLM-L6-v2"
+_MIN_SCORE = 0.60
 
 
 def _series_from_ticker(ticker: str) -> str:
@@ -63,17 +66,16 @@ class VectorMemory:
     """
 
     def __init__(self) -> None:
-        self._index  = None   # Pinecone index — lazy init
-        self._model  = None   # SentenceTransformer model — lazy init
-        self._ready  = False  # True once both are initialised without error
+        self._index     = None   # Pinecone index — lazy init
+        self._ready     = False  # True once Pinecone is initialised without error
         self._attempted = False  # Avoid repeated init attempts after failure
 
     # ── Initialization ────────────────────────────────────────────────────────
 
     def _init(self) -> bool:
         """
-        Lazy-initialise Pinecone index and embedding model.
-        Returns True if both are ready. Caches the result so we only try once.
+        Lazy-initialise Pinecone index. Returns True if ready.
+        Caches the result — only attempts once per process lifetime.
         """
         if self._ready:
             return True
@@ -86,10 +88,9 @@ class VectorMemory:
 
             api_key = getattr(settings, "pinecone_api_key", "")
             if not api_key:
-                log.debug("vector_memory_unavailable using_fallback=True reason=no_api_key")
+                log.debug("vector_memory_unavailable reason=no_api_key using_fallback=True")
                 return False
 
-            # ── Pinecone v3 client ────────────────────────────────────────────
             from pinecone import Pinecone, ServerlessSpec
             pc = Pinecone(api_key=api_key)
 
@@ -104,38 +105,55 @@ class VectorMemory:
                     metric="cosine",
                     spec=ServerlessSpec(cloud="aws", region="us-east-1"),
                 )
-                # Wait briefly for index to be ready
-                for _ in range(10):
-                    time.sleep(2)
-                    if pc.describe_index(index_name).status.get("ready", False):
-                        break
+                # Poll until ready (free tier usually takes 10–30s)
+                for _ in range(15):
+                    time.sleep(3)
+                    try:
+                        status = pc.describe_index(index_name).status
+                        if status.get("ready", False):
+                            break
+                    except Exception:
+                        pass
 
             self._index = pc.Index(index_name)
-            log.info("vector_memory_pinecone_ready", index=index_name)
+            self._ready = True
+            log.info("vector_memory_initialized", index=index_name, embed="ngram_384")
+            return True
 
         except Exception as exc:
             log.warning("vector_memory_pinecone_init_failed", error=str(exc)[:120])
             return False
 
-        try:
-            # ── sentence-transformers embedding model ─────────────────────────
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(_EMBED_MODEL)
-            log.info("vector_memory_embed_model_ready", model=_EMBED_MODEL)
-        except Exception as exc:
-            log.warning("vector_memory_embed_model_failed", error=str(exc)[:120])
-            self._index = None
-            return False
-
-        self._ready = True
-        log.info("vector_memory_initialized", index=getattr(self._index, "_index_name", "?"))
-        return True
-
-    # ── Embedding ─────────────────────────────────────────────────────────────
+    # ── Embedding — lightweight n-gram hashing (numpy only, no torch) ─────────
 
     def _embed(self, text: str) -> list[float]:
-        """Embed text using all-MiniLM-L6-v2. Returns 384-dim float list."""
-        vec = self._model.encode(text, normalize_embeddings=True)
+        """
+        Deterministic 384-dim embedding using character n-gram hashing.
+
+        Approach: hash each word + bigram into a bucket [0, 384), accumulate
+        position-weighted counts, then L2-normalise. Produces stable vectors
+        that capture vocabulary similarity without any ML library.
+
+        Good enough for matching KXGDP vs KXGDP, WIN patterns vs WIN patterns,
+        conviction vs fast_technical, etc. Can be swapped for proper embeddings
+        later without changing any other code.
+        """
+        vec = np.zeros(_EMBED_DIM, dtype=np.float32)
+        tokens = text.lower().split()
+
+        for i, token in enumerate(tokens):
+            # Unigram
+            h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+            vec[h % _EMBED_DIM] += 1.0 / (i + 1)
+            # Bigram with previous token
+            if i > 0:
+                bigram = tokens[i - 1] + "_" + token
+                h2 = int(hashlib.sha1(bigram.encode()).hexdigest(), 16)
+                vec[h2 % _EMBED_DIM] += 0.5 / (i + 1)
+
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
         return vec.tolist()
 
     def _uid(self, prefix: str, ticker: str) -> str:
