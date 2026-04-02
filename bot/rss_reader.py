@@ -7,8 +7,8 @@ without a Claude call. High-priority articles get ONE Claude call to evaluate
 market impact and routing.
 
 Output routing:
-  #breaking-news         — major market-moving events (shared 5/day cap with Axios)
-  #market-pulse          — crypto-specific intel notes
+  #breaking         — major market-moving events (shared 5/day cap with Axios)
+  #attention        — market intel notes (routed via market-pulse alias)
   rss_context_today.json — rolling context file for morning brief
   Supabase rss_articles  — full processing log
 
@@ -422,16 +422,16 @@ Top Kalshi markets right now:
 Respond with ONLY this JSON:
 {{
   "market_moving": true/false,
-  "channel": "breaking-news" | "market-pulse" | "context-only" | "skip",
+  "channel": "breaking" | "attention" | "context-only" | "skip",
   "headline": "plain English headline under 120 chars",
   "market_angle": "one sentence on the trading implication, or empty string",
   "kalshi_angle": "specific Kalshi market this could affect, or empty string"
 }}
 
 Routing rules:
-- "breaking-news": genuinely market-moving event that could move prices TODAY
+- "breaking": genuinely market-moving event that could move prices TODAY
   (rate decisions, geopolitical shocks, major M&A, SEC actions, exchange failures)
-- "market-pulse": crypto-specific news, DeFi/exchange news, crypto regulatory moves
+- "attention": crypto-specific news, DeFi/exchange news, crypto regulatory moves
 - "context-only": useful background but not immediately actionable (previews, summaries, analyst notes)
 - "skip": not market-relevant despite matching keywords
 - market_moving=true only if this could move crypto, stocks, bonds, or commodities within 24h"""
@@ -502,9 +502,9 @@ Routing rules:
             lines.append(f"<{url}>")
         post = "\n".join(lines)
 
-        if channel == "breaking-news":
+        if channel == "breaking":
             await discord.notify_breaking_alert(post, source=source)
-        elif channel == "market-pulse":
+        elif channel in ("attention", "market-pulse"):
             await discord.notify_rss_intel(post)
 
     # ── Supabase logging ──────────────────────────────────────────────────────
@@ -558,7 +558,7 @@ Routing rules:
         global _processed_urls
         _reset_daily_state()
 
-        # Import shared breaking-news counter from email_reader
+        # Import shared breaking counter from email_reader
         import email_reader as _er
 
         budget_exhausted = (_rss_call_count >= self._call_limit)
@@ -646,11 +646,11 @@ Routing rules:
                     })
 
                 # Post to Discord if warranted
-                if channel in ("breaking-news", "market-pulse"):
+                if channel in ("breaking", "attention"):
                     today = _today_et()
 
-                    if channel == "breaking-news":
-                        # Check shared breaking-news cap (same counter as Axios alerts)
+                    if channel == "breaking":
+                        # Check shared breaking cap (same counter as Axios alerts)
                         breaking_today = (
                             _er._breaking_count if _er._breaking_date == today else 0
                         )
@@ -663,7 +663,7 @@ Routing rules:
 
                     try:
                         await self._post_to_discord(channel, article, eval_result)
-                        if channel == "breaking-news":
+                        if channel == "breaking":
                             _er._breaking_count = (
                                 (_er._breaking_count + 1) if _er._breaking_date == today else 1
                             )

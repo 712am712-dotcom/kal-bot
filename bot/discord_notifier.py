@@ -1,13 +1,24 @@
 """
 discord_notifier.py — Discord notifications for Kal.
 
-10 channels across 6 categories:
-  🧠 INTELLIGENCE  morning-brief, breaking-news
-  📊 TRADING       trades, trade-history
-  🔄 DAILY PULSE   market-pulse
-  📅 RESEARCH      thesis, economic-calendar
-  💡 IDEAS         ideas
-  ⚙️ SYSTEM        summary, alerts
+Kal — Causal Intelligence Engine
+Tagline: Attention → Insight → Content → Feedback → Intelligence
+
+11 channels across 4 categories:
+  📡 DAILY INTELLIGENCE  morning-brief, attention, breaking, patterns
+  🎬 CONTENT ENGINE      content-queue, content-output, content-review
+  📊 FEEDBACK LOOP       performance, wins, misses
+  ⚙️ SYSTEM              alerts, system-logs
+
+Legacy channel alias map (old names automatically routed to new channels):
+  breaking-news     → breaking
+  market-pulse      → attention
+  thesis            → patterns
+  economic-calendar → morning-brief
+  ideas             → content-queue
+  summary           → system-logs
+  trades            → system-logs
+  trade-history     → system-logs
 
 All messages:
   - Plain English — full coin names (Bitcoin, Ethereum, Solana)
@@ -33,6 +44,20 @@ import fallback_notifier
 log = logging.getLogger(__name__)
 
 KAL = "Kal"
+
+# ── Channel alias map ─────────────────────────────────────────────────────────
+# Old channel names are silently remapped to the new structure.
+# All existing _send() calls keep working without modification.
+_CHANNEL_ALIAS: dict[str, str] = {
+    "breaking-news":     "breaking",
+    "market-pulse":      "attention",
+    "thesis":            "patterns",
+    "economic-calendar": "morning-brief",
+    "ideas":             "content-queue",
+    "summary":           "system-logs",
+    "trades":            "system-logs",
+    "trade-history":     "system-logs",
+}
 
 # Module-level bot instance — set by send_channel_guide() after startup.
 # When set, _send() routes through the bot API (channel IDs) instead of webhooks.
@@ -102,6 +127,9 @@ async def _discord_raw(channel: str, payload: dict) -> None:
       2. Channel-specific webhook URL  — fallback if bot not set up
       3. Legacy single webhook URL     — last resort
     """
+    # ── Remap legacy channel names to new structure ───────────────────────────
+    channel = _CHANNEL_ALIAS.get(channel, channel)
+
     # ── 1. Bot API ────────────────────────────────────────────────────────────
     if _bot is not None:
         ch_id = _bot.channel_id(channel)
@@ -204,9 +232,15 @@ async def notify_bot_started(mode: str, demo: bool) -> None:
         pass
 
     env = "paper" if demo else "live capital"
-    mode_str = {"paper": "Paper trading", "research": "Research", "live": "Live trading"}.get(mode, mode.capitalize())
+    mode_str = {
+        "paper":     "Paper trading",
+        "research":  "Research",
+        "live":      "Live trading",
+        "intelligence": "Intelligence",
+    }.get(mode, mode.capitalize())
     await _send("alerts", _embed(
-        f"**Kal is online.** {mode_str} mode — {env}.\nWatching BTC, ETH, SOL 15-minute markets.",
+        f"**Kal is online.** {mode_str} mode — Causal Intelligence Engine.\n"
+        f"Attention → Insight → Content → Feedback → Intelligence",
         COLOR_BLUE,
         footer=_now_et(),
     ))
@@ -869,7 +903,7 @@ async def notify_breaking_news(article: dict, markets: list[dict]) -> None:
             pct = round(m.get("yes_price", 0.5) * 100)
             lines.append(f"• {m['title'][:60]} — {pct}%")
 
-    await _send("breaking-news", _embed(
+    await _send("breaking", _embed(
         "\n".join(lines),
         COLOR_RED,
         footer=f"breaking · {_now_et()}",
@@ -926,7 +960,7 @@ async def notify_breaking_alert(post: str, source: str = "") -> None:
                 Used to build the footer label.
     """
     label = _breaking_source_label(source) if source else "Breaking News"
-    await _send("breaking-news", _embed(
+    await _send("breaking", _embed(
         post,
         COLOR_RED,
         footer=f"{label} · {_now_et()}",
@@ -1026,113 +1060,113 @@ async def notify_todays_focus(focus: str) -> None:
 
 # ── Channel guides ────────────────────────────────────────────────────────────
 # Each guide is pinned at the top of its channel on bot startup.
+# Server identity: Kal — Causal Intelligence Engine
+# Tagline: Attention → Insight → Content → Feedback → Intelligence
 
-# ── 🧠 INTELLIGENCE ───────────────────────────────────────────────────────────
+# ── 📡 DAILY INTELLIGENCE ─────────────────────────────────────────────────────
 
 _GUIDE_MORNING_BRIEF = (
     "**Kal — #morning-brief**\n"
-    "Posted every morning between 5:30–9am ET. Kal reads 28 financial newsletters and synthesizes them into one brief.\n\n"
-    "**What you'll see:** The day's connecting theme in one sentence · Macro big picture with trade implications · "
-    "What's moving and why (with explicit trade angles) · The single highest conviction idea of the day · "
-    "Any genuine Kalshi angles · Today's watch list.\n\n"
-    "One post per morning. The Trade Today insight also cross-posted to #market-pulse."
+    "Posted every morning between 5:30–9am ET. Kal reads financial newsletters and synthesizes them into one brief.\n\n"
+    "**What you'll see:** The day's connecting theme · Macro big picture · "
+    "What's moving and why · The single highest conviction idea of the day · "
+    "Economic calendar events · Today's watch list.\n\n"
+    "One post per morning."
 )
 
-_GUIDE_BREAKING_NEWS = (
-    "**Kal — #breaking-news**\n"
-    "Real-time alerts when major market-moving events happen. Axios breaking news evaluated for market impact.\n\n"
-    "**What you'll see:** Breaking headlines · Market angle and trade implication · "
-    "Which Kalshi markets could move · Current crowd pricing.\n\n"
-    "Max 5 posts per day. Only posts when there's a genuine market angle."
+_GUIDE_ATTENTION = (
+    "**Kal — #attention**\n"
+    "The 3-5 highest-signal topics of the day. What people are paying attention to right now.\n\n"
+    "**What you'll see:** Attention signals scored 1–10 based on cross-source frequency and keyword weight. "
+    "Only signals scoring 6+ are posted. Each signal includes: topic, why it matters, "
+    "what triggered it today, and which sources flagged it.\n\n"
+    "Posted 3–5 times per day between 8am–6pm ET. Max 5 posts per day.\n\n"
+    "High-score signals (8+) are auto-queued to #content-queue."
 )
 
-# ── 📊 TRADING ────────────────────────────────────────────────────────────────
-
-_GUIDE_TRADES = (
-    "**Kal — #trades**\n"
-    "Open positions only. Every trade Kal currently has live.\n\n"
-    "**Trade Placed** — Kal put money on a market. Shows coin, direction, amount, odds, and win condition.\n"
-    "**Position Update** — Snapshot of all currently open trades.\n\n"
-    "Clears automatically when a position resolves. Check #trade-history for the full record."
+_GUIDE_BREAKING = (
+    "**Kal — #breaking**\n"
+    "Real-time alerts when major market-moving or attention-shifting events happen.\n\n"
+    "**What you'll see:** Breaking headlines · Why it matters · Which markets or audiences it affects.\n\n"
+    "Max 5 posts per day. Only posts when there's a genuine signal."
 )
 
-_GUIDE_TRADE_HISTORY = (
-    "**Kal — #trade-history**\n"
-    "Every closed trade — wins and losses. The permanent record. This is where the track record lives.\n\n"
-    "**Win** — Trade resolved in Kal's favor. Shows profit and updated record.\n"
-    "**Loss** — Trade resolved against Kal. Shows the loss and running record.\n\n"
-    "All trades are paper (simulated) until Kal is switched to live mode."
+_GUIDE_PATTERNS = (
+    "**Kal — #patterns**\n"
+    "Daily pattern report posted at 5pm ET. Repeating themes across today's sources.\n\n"
+    "**What you'll see:** Pattern name · Evidence (3 bullet points showing where it appeared) · "
+    "Implication (what this pattern suggests is coming).\n\n"
+    "A pattern is detected when the same topic appears across 4+ different sources in one day.\n\n"
+    "One post per day. Every pattern here has multi-source evidence."
 )
 
-# ── 🔄 DAILY PULSE ────────────────────────────────────────────────────────────
+# ── 🎬 CONTENT ENGINE ─────────────────────────────────────────────────────────
 
-_GUIDE_MARKET_PULSE = (
-    "**Kal — #market-pulse**\n"
-    "Kal's live market feed. Everything happening in markets — in one place.\n\n"
-    "**Market open 9:30am ET** — Where Bitcoin, Ethereum, Solana, gold, oil, and bonds are opening. "
-    "Plus yields and the one thing worth watching today.\n"
-    "**Hourly TA updates** — Technical analysis for BTC, ETH, SOL throughout the day. "
-    "Price action, RSI, MACD, trend, and Kalshi crowd pricing.\n"
-    "**Intelligence signals** — Price shifts, volume spikes, new 15-minute windows with real money in. "
-    "High conviction signals flagged with ⚡.\n"
-    "**Market close 4pm ET** — Kal's daily reflection. What moved, why, what he learned.\n\n"
-    "This is the heartbeat channel."
+_GUIDE_CONTENT_QUEUE = (
+    "**Kal — #content-queue**\n"
+    "Signals selected for content creation. Auto-populated when attention score ≥ 8 "
+    "or when a topic appears in both #attention and #patterns.\n\n"
+    "**What you'll see:** Content opportunity with suggested angle, format, and urgency.\n\n"
+    "This is where Kal hands off to the content team. Review here, create in Storyforge."
 )
 
-# ── 📅 RESEARCH ───────────────────────────────────────────────────────────────
-
-_GUIDE_THESIS = (
-    "**Kal — #thesis**\n"
-    "Bigger picture analysis. Posted when there's something genuinely worth saying.\n\n"
-    "**What you'll see:** Weekly breakdowns every Monday — last week's performance, market review, "
-    "top setups for the week ahead · Sector and macro reads · Watchlist opportunities · "
-    "Kal's longer-form market theses with full reasoning.\n\n"
-    "Not a firehose. Every post here earned its place."
+_GUIDE_CONTENT_OUTPUT = (
+    "**Kal — #content-output**\n"
+    "Final content briefs and captions ready for review.\n\n"
+    "**What you'll see:** Finished content briefs — hook, body, CTA — ready to approve or tweak.\n\n"
+    "Nothing posts here until it passes through #content-queue first."
 )
 
-_GUIDE_ECONOMIC_CALENDAR = (
-    "**Kal — #economic-calendar**\n"
-    "Posted every Sunday at 8am ET with the full week ahead — high impact events, "
-    "Fed meeting dates, CPI releases, jobs reports, bond market readings, and Kalshi markets to watch.\n\n"
-    "**What you'll see:** High and medium impact economic events for the week · "
-    "Current bond market readings (yields, curve, credit spreads) · "
-    "Key macro data (CPI, unemployment, oil, gold) · "
-    "Kalshi markets that connect to this week's events · Theme for the week.\n\n"
-    "Daily event alerts also posted here on weekdays with major scheduled releases."
+_GUIDE_CONTENT_REVIEW = (
+    "**Kal — #content-review**\n"
+    "Approve or tweak content before it goes live.\n\n"
+    "Reply **APPROVE** to greenlight, or suggest changes inline.\n\n"
+    "Final gate before anything is published."
 )
 
-_GUIDE_IDEAS = (
-    "**Kal — #ideas**\n"
-    "Private channel. Kal brings opportunities here that are outside his current trading mandate.\n\n"
-    "Kal executes Kalshi prediction markets and crypto trades autonomously. "
-    "He posts here only when he sees an opportunity in stocks, bonds, commodities, "
-    "or wants to request a mandate expansion.\n\n"
-    "**How it works:** Kal posts an idea with full context, the specific trade he'd make, "
-    "and the risks. Reply **APPROVED** to let him proceed, or **PASS** to decline.\n\n"
-    "Maximum one idea per day. Only genuine high conviction setups."
+# ── 📊 FEEDBACK LOOP ──────────────────────────────────────────────────────────
+
+_GUIDE_PERFORMANCE = (
+    "**Kal — #performance**\n"
+    "Post performance tracking. How is the content performing?\n\n"
+    "**What you'll see:** Reach, engagement, saves, shares — updated as data comes in.\n\n"
+    "Connects back to #content-queue signals so Kal learns what content resonates."
+)
+
+_GUIDE_WINS = (
+    "**Kal — #wins**\n"
+    "High performing posts only. Saved here to teach Kal what works.\n\n"
+    "A win = a post that significantly outperforms baseline. Kal uses this to calibrate future signals."
+)
+
+_GUIDE_MISSES = (
+    "**Kal — #misses**\n"
+    "Low performing posts and lessons. Saved here to teach Kal what doesn't work.\n\n"
+    "A miss = a post that underperformed. Analyzing misses is how the system gets smarter."
 )
 
 # ── ⚙️ SYSTEM ─────────────────────────────────────────────────────────────────
 
-_GUIDE_SUMMARY = (
-    "**Kal — #summary**\n"
-    "Performance reports, P&L updates, and cost tracking.\n\n"
-    "**Check In** — Posted every 3 hours. Shows markets scanned, trades placed, wins, losses, P&L.\n"
-    "**Daily Report** — End-of-day breakdown with Excel scorecard attached.\n"
-    "**Research Complete** — After a full market scan with top opportunities found.\n"
-    "**Daily Cost Report** — How much Kal spent on Claude API calls today.\n\n"
-    "System-level updates only. No market analysis here."
-)
-
 _GUIDE_ALERTS = (
     "**Kal — #alerts**\n"
-    "Technical issues only. If something is wrong with the bot, it shows up here.\n\n"
+    "Technical issues only. If something is wrong with the pipeline, it shows up here.\n\n"
     "**Online/Offline** — Kal started up or shut down.\n"
     "**Out of Credits** — Anthropic API credits exhausted. Analysis paused.\n"
     "**Cost Warning** — Approaching daily spending limit.\n"
-    "**Error** — Something went wrong technically. Kal is still running.\n"
-    "**Order Rejected** — Kalshi rejected a trade order.\n\n"
+    "**Error** — Something went wrong technically. Kal is still running.\n\n"
     "Should be quiet most of the time. Noise here = something needs attention."
+)
+
+_GUIDE_SYSTEM_LOGS = (
+    "**Kal — #system-logs**\n"
+    "Pipeline runs, errors, and cost tracking. The technical record.\n\n"
+    "**What you'll see:** Scan completions · Cost reports · Pipeline errors · Performance summaries.\n\n"
+    "**Owner commands:** Send a message starting with `Kal:` to query Kal directly.\n"
+    "Examples:\n"
+    "  `Kal: what's the top signal today?`\n"
+    "  `Kal: what patterns are you seeing this week?`\n"
+    "  `Kal: what should I make content about today?`\n\n"
+    "Max 10 queries per day. Responses use current RSS + morning brief data."
 )
 
 
@@ -1322,8 +1356,77 @@ async def notify_rss_intel(post: str) -> None:
 
 
 async def notify_idea(idea_text: str) -> None:
-    """Post an #ideas flagging post to the private #ideas channel."""
-    await _send("ideas", {"content": idea_text, "username": KAL})
+    """Post a content opportunity to #content-queue (formerly #ideas)."""
+    await _send("content-queue", {"content": idea_text, "username": KAL})
+
+
+# ── New intelligence channel notifications ────────────────────────────────────
+
+async def notify_attention_signal(
+    topic: str,
+    why_matters: str,
+    why_now: str,
+    score: int,
+    sources: list[str],
+) -> None:
+    """Post an attention signal to #attention. Only called if score >= 6."""
+    source_str = ", ".join(sources) if sources else "multiple sources"
+    lines = [
+        "**Attention Signal**",
+        f"**Topic:** {topic}",
+        f"**Why it matters:** {why_matters}",
+        f"**Why now:** {why_now}",
+        f"**Signal score:** {score}/10",
+        f"**Sources:** {source_str}",
+    ]
+    await _send("attention", {"content": "\n".join(lines), "username": KAL})
+
+
+async def notify_pattern_report(
+    pattern: str,
+    evidence: list[str],
+    implication: str,
+    date_str: str = "",
+) -> None:
+    """Post the daily pattern report to #patterns at 5pm ET."""
+    import datetime as _dt
+    if not date_str:
+        date_str = _dt.date.today().strftime("%B %-d, %Y")
+    bullets = "\n".join(f"• {e}" for e in evidence[:3])
+    lines = [
+        f"**Pattern Report — {date_str}**",
+        f"**Pattern:** {pattern}",
+        f"**Evidence:**\n{bullets}",
+        f"**Implication:** {implication}",
+    ]
+    await _send("patterns", {"content": "\n".join(lines), "username": KAL})
+
+
+async def notify_content_opportunity(
+    signal: str,
+    angle: str,
+    format_suggestion: str,
+    urgency: str,
+) -> None:
+    """Auto-post a content opportunity to #content-queue when attention score >= 8."""
+    lines = [
+        "**Content Opportunity**",
+        f"**Signal:** {signal}",
+        f"**Angle:** {angle}",
+        f"**Format suggestion:** {format_suggestion}",
+        f"**Urgency:** {urgency}",
+    ]
+    await _send("content-queue", {"content": "\n".join(lines), "username": KAL})
+
+
+async def notify_system_log(message: str) -> None:
+    """Post a pipeline log entry to #system-logs."""
+    await _send("system-logs", {"content": message, "username": KAL})
+
+
+async def notify_owner_response(response: str) -> None:
+    """Post Kal's response to an owner `Kal:` query in #system-logs."""
+    await _send("system-logs", {"content": response, "username": KAL})
 
 
 async def send_channel_guide() -> None:
@@ -1332,7 +1435,7 @@ async def send_channel_guide() -> None:
 
     When DISCORD_BOT_TOKEN is set:
       1. Update bot profile to username "Kal" with the green logo avatar
-      2. Find or create all 6 categories and 10 sub-channels
+      2. Find or create all 4 categories and 11 sub-channels
       3. Post guide cards to any channel that doesn't have one yet (idempotent)
       4. Pin each guide card (best-effort)
       5. Cache channel IDs so all future _send() calls go through the bot
@@ -1344,24 +1447,24 @@ async def send_channel_guide() -> None:
 
     token = getattr(settings, "discord_bot_token", "")
 
-    # Full guide map — all 10 channels
+    # Full guide map — all 11 channels (new structure)
     guides = {
-        # 🧠 INTELLIGENCE
-        "morning-brief":      _GUIDE_MORNING_BRIEF,
-        "breaking-news":      _GUIDE_BREAKING_NEWS,
-        # 📊 TRADING
-        "trades":             _GUIDE_TRADES,
-        "trade-history":      _GUIDE_TRADE_HISTORY,
-        # 🔄 DAILY PULSE
-        "market-pulse":       _GUIDE_MARKET_PULSE,
-        # 📅 RESEARCH
-        "thesis":             _GUIDE_THESIS,
-        "economic-calendar":  _GUIDE_ECONOMIC_CALENDAR,
-        # 💡 IDEAS
-        "ideas":              _GUIDE_IDEAS,
+        # 📡 DAILY INTELLIGENCE
+        "morning-brief":   _GUIDE_MORNING_BRIEF,
+        "attention":       _GUIDE_ATTENTION,
+        "breaking":        _GUIDE_BREAKING,
+        "patterns":        _GUIDE_PATTERNS,
+        # 🎬 CONTENT ENGINE
+        "content-queue":   _GUIDE_CONTENT_QUEUE,
+        "content-output":  _GUIDE_CONTENT_OUTPUT,
+        "content-review":  _GUIDE_CONTENT_REVIEW,
+        # 📊 FEEDBACK LOOP
+        "performance":     _GUIDE_PERFORMANCE,
+        "wins":            _GUIDE_WINS,
+        "misses":          _GUIDE_MISSES,
         # ⚙️ SYSTEM
-        "summary":            _GUIDE_SUMMARY,
-        "alerts":             _GUIDE_ALERTS,
+        "alerts":          _GUIDE_ALERTS,
+        "system-logs":     _GUIDE_SYSTEM_LOGS,
     }
 
     if token:

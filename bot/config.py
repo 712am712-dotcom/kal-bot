@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     # ── Intelligence Scanner ──────────────────────────────────────────────────
     intelligence_scan_interval: int = Field(default=30, description="Intelligence scanner interval in minutes")
 
+    # ── Trading Pause ─────────────────────────────────────────────────────────
+    trading_paused: bool = Field(default=False, description="When true: skip all market scanning. Intelligence pipeline (RSS, brief, attention, patterns) keeps running.")
+
     # ── Cost Controls ─────────────────────────────────────────────────────────
     active_coins:                  str   = Field(default="BTC,ETH,SOL", description="Comma-separated coins to analyze. Use 'BTC' to cut calls 3x.")
     active_series:                 str   = Field(default="KXGDP,KXFED,KXCPI,KXBTC15M,KXETH15M,KXSOL15M,KXINX", description="Ordered Kalshi series to scan each cycle. Priority order matters — first = analyzed first.")

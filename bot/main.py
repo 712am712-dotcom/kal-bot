@@ -62,6 +62,7 @@ from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_post
 from rss_reader import RSSReader
 from haiku_prefilter import HaikuPrefilter
 from vector_memory import VectorMemory
+from attention_engine import AttentionEngine
 
 log = structlog.get_logger(__name__)
 
@@ -614,6 +615,10 @@ async def run_research_scan(
     db:      DBLogger,
     tracker: PerformanceTracker,
 ) -> None:
+    if getattr(settings, "trading_paused", False):
+        log.info("trading_paused", mode="intelligence_only")
+        return
+
     log.info("research_scan_start", focus=settings.market_focus)
     start_time = datetime.datetime.utcnow()
 
@@ -871,6 +876,10 @@ async def run_live_scan(
 ) -> None:
     global _current_window_close, _analyzed_this_window, _use_fallback_model, _credits_exhausted
     global _haiku_calls_today, _haiku_cost_today
+
+    if getattr(settings, "trading_paused", False):
+        log.info("trading_paused", mode="intelligence_only")
+        return
 
     log.info("live_scan_start", demo=settings.demo_mode, focus=settings.market_focus)
 
@@ -1880,6 +1889,130 @@ async def _intelligence_scan_task(
             log.warning("intelligence_scan_failed", error=str(exc))
 
 
+# ── Attention + Pattern task ─────────────────────────────────────────────────
+
+async def _attention_task(engine: "AttentionEngine") -> None:
+    """
+    Background task: check for attention signals every 90 minutes between 8am–6pm ET.
+    Also fires the 5pm pattern report check every cycle.
+    Haiku only — target cost under $0.02/day.
+    """
+    while True:
+        await asyncio.sleep(30 * 60)   # check every 30 min; engine enforces 90-min internal throttle
+        try:
+            await engine.run_attention_check()
+            await engine.run_pattern_check()
+        except Exception as exc:
+            log.warning("attention_task_error", error=str(exc))
+
+
+# ── Owner query listener ──────────────────────────────────────────────────────
+
+_owner_query_count_today: int = 0
+_owner_query_date:        str = ""
+_MAX_OWNER_QUERIES        = 10
+
+async def _owner_query_task(bot_token: str) -> None:
+    """
+    Poll #system-logs for messages starting with 'Kal:' from the server owner.
+    Responds using current RSS context + morning brief data.
+    Max 10 queries per day. Polls every 60 seconds.
+    """
+    global _owner_query_count_today, _owner_query_date
+
+    if not bot_token:
+        return
+
+    from discord_bot import DiscordBot
+    import email_reader as _er
+    from rss_reader import load_rss_context_for_brief
+
+    bot = DiscordBot(bot_token)
+    _seen_message_ids: set[int] = set()
+
+    # Give the bot setup a moment to complete before polling
+    await asyncio.sleep(15)
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            today = datetime.date.today().isoformat()
+            if _owner_query_date != today:
+                _owner_query_count_today = 0
+                _owner_query_date = today
+
+            if _owner_query_count_today >= _MAX_OWNER_QUERIES:
+                continue
+
+            guild_id = await bot.get_guild_id()
+
+            # Find system-logs channel
+            channels = await bot._list_channels(guild_id)
+            syslog_ch = next((c for c in channels if c.get("name") == "system-logs" and c.get("type") == 0), None)
+            if not syslog_ch:
+                continue
+            ch_id = int(syslog_ch["id"])
+
+            messages = await bot.get_messages(ch_id, limit=10)
+            for msg in messages:
+                msg_id = int(msg["id"])
+                if msg_id in _seen_message_ids:
+                    continue
+                _seen_message_ids.add(msg_id)
+
+                content = msg.get("content", "").strip()
+                if not content.lower().startswith("kal:"):
+                    continue
+
+                query = content[4:].strip()
+                if not query:
+                    continue
+
+                # Build context from RSS + brief
+                rss_ctx = load_rss_context_for_brief()
+                context_snippet = rss_ctx[:1500] if rss_ctx else "No RSS context available today."
+
+                # Haiku call to answer the query
+                try:
+                    import httpx as _httpx
+                    resp = await _httpx.AsyncClient(timeout=20.0).__aenter__()
+                    response = await resp.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "x-api-key":         settings.anthropic_api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type":      "application/json",
+                        },
+                        json={
+                            "model":      settings.claude_fallback_model,
+                            "max_tokens": 400,
+                            "messages":   [{
+                                "role":    "user",
+                                "content": (
+                                    f"You are Kal, a causal intelligence system. "
+                                    f"Answer this query from your CEO using today's intelligence context.\n\n"
+                                    f"Query: {query}\n\n"
+                                    f"Today's intelligence context:\n{context_snippet}\n\n"
+                                    f"Answer in 3-5 sentences. Be specific and direct."
+                                ),
+                            }],
+                        },
+                    )
+                    await resp.__aexit__(None, None, None)
+                    answer = response.json()["content"][0]["text"].strip()
+                except Exception as haiku_exc:
+                    log.warning("owner_query_haiku_failed", error=str(haiku_exc))
+                    answer = f"I couldn't process that query right now (API error). Try again shortly."
+
+                import discord_notifier as _discord
+                await _discord.notify_owner_response(f"**Kal response to:** *{query}*\n\n{answer}")
+                _owner_query_count_today += 1
+                log.info("owner_query_answered", query=query[:60], count=_owner_query_count_today)
+
+        except Exception as exc:
+            log.warning("owner_query_task_error", error=str(exc))
+
+
 # ── Startup credit probe ──────────────────────────────────────────────────────
 
 async def _startup_credit_check() -> None:
@@ -2073,13 +2206,16 @@ async def main_async() -> None:
     import os
     from pathlib import Path as _Path
 
-    if settings.paper_trading:
+    if getattr(settings, "trading_paused", False):
+        mode = "intelligence"
+    elif settings.paper_trading:
         mode = "paper"
     elif settings.research_mode:
         mode = "research"
     else:
         mode = "live"
-    log.info("kal_starting", mode=mode, demo=settings.demo_mode, paper=settings.paper_trading)
+    log.info("kal_starting", mode=mode, demo=settings.demo_mode, paper=settings.paper_trading,
+             trading_paused=getattr(settings, "trading_paused", False))
 
     # ── Lock file: kill any existing instance before starting ────────────────
     _lock_path = _Path(__file__).parent / "kal.lock"
@@ -2112,11 +2248,16 @@ async def main_async() -> None:
     # Eagerly connect — logs success or failure, never silently falls through
     if _vm.startup():
         _vm.test_connection()
-    tracker       = PerformanceTracker()
-    period_stats  = _PeriodStats()
-    intel_scanner = IntelligenceScanner(kalshi)
-    ta_analyzer   = TechnicalAnalyzer()
-    news_intel    = NewsIntelligence(kalshi)
+    tracker          = PerformanceTracker()
+    period_stats     = _PeriodStats()
+    intel_scanner    = IntelligenceScanner(kalshi)
+    ta_analyzer      = TechnicalAnalyzer()
+    news_intel       = NewsIntelligence(kalshi)
+    attention_engine = AttentionEngine(
+        api_key=settings.anthropic_api_key,
+        haiku_model=settings.claude_fallback_model,
+    )
+    _bot_token = getattr(settings, "discord_bot_token", "")
     # IMAP: prefer KAL_EMAIL_ADDRESS/PASSWORD (Outlook/any provider),
     # fall back to old KAL_GMAIL_ADDRESS/APP_PASSWORD for existing setups
     _imap_addr = (
@@ -2148,13 +2289,36 @@ async def main_async() -> None:
     await discord.send_channel_guide()
     journal_mod.log_session_start(mode=mode, demo=settings.demo_mode)
 
+    if getattr(settings, "trading_paused", False):
+        log.info("trading_paused", mode="intelligence_only")
+        await discord.notify_system_log(
+            "**Kal online** — Intelligence-only mode. "
+            "Trading paused. RSS, morning brief, attention signals, and patterns are running."
+        )
+
     # ── Startup credit probe — ensures _credits_exhausted reflects reality ─────
     await _startup_credit_check()
 
     try:
         intel_interval = getattr(settings, "intelligence_scan_interval", 30)
 
-        if settings.paper_trading:
+        if getattr(settings, "trading_paused", False):
+            # Intelligence-only mode: run all intelligence tasks but no trading
+            log.info("intelligence_only_mode_active")
+            asyncio.create_task(_gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
+            asyncio.create_task(_axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
+            asyncio.create_task(_rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn))
+            asyncio.create_task(_scheduled_analysis_task(ta_analyzer, tracker, kalshi, model_override_fn=_model_override_fn))
+            asyncio.create_task(_economic_calendar_task(kalshi))
+            asyncio.create_task(_market_open_task())
+            asyncio.create_task(_market_close_task(model_override_fn=_model_override_fn))
+            asyncio.create_task(_attention_task(attention_engine))
+            asyncio.create_task(_owner_query_task(_bot_token))
+            # Keep process alive
+            while True:
+                await asyncio.sleep(3600)
+
+        elif settings.paper_trading:
             # Paper trading: live scan loop on demo API, resolve every 5 min
             log.info("paper_trading_mode_active", scan_interval=settings.scan_interval_minutes)
             resolution_task  = asyncio.create_task(
@@ -2198,6 +2362,8 @@ async def main_async() -> None:
                 _market_close_task(model_override_fn=_model_override_fn)
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
+            attention_task    = asyncio.create_task(_attention_task(attention_engine))
+            owner_query_task  = asyncio.create_task(_owner_query_task(_bot_token))
 
             async def paper_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)
@@ -2218,6 +2384,8 @@ async def main_async() -> None:
                 _intelligence_scan_task(intel_scanner, interval_minutes=intel_interval)
             )
             asyncio.create_task(_ta_refresh_task(ta_analyzer, interval_minutes=15))
+            asyncio.create_task(_attention_task(attention_engine))
+            asyncio.create_task(_owner_query_task(_bot_token))
             await run_research_scan(kalshi, claude, db, tracker)
             log.info("research_complete_awaiting_funding")
             # Send performance report at end of research run
@@ -2274,6 +2442,8 @@ async def main_async() -> None:
                 _market_close_task(model_override_fn=_model_override_fn)
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
+            attention_task    = asyncio.create_task(_attention_task(attention_engine))
+            owner_query_task  = asyncio.create_task(_owner_query_task(_bot_token))
 
             async def live_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)

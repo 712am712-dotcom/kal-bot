@@ -28,18 +28,15 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://discord.com/api/v10"
 
-# 6-category structure — each tuple is (category_name, [channel_names_in_order])
-# private=True channels are created with @everyone view permission denied.
+# 4-category structure — each tuple is (category_name, [channel_names_in_order])
 CATEGORIES = [
-    ("🧠 INTELLIGENCE",  ["morning-brief", "breaking-news"]),
-    ("📊 TRADING",        ["trades", "trade-history"]),
-    ("🔄 DAILY PULSE",   ["market-pulse"]),
-    ("📅 RESEARCH",       ["thesis", "economic-calendar"]),
-    ("💡 IDEAS",          ["ideas"]),
-    ("⚙️ SYSTEM",         ["summary", "alerts"]),
+    ("📡 DAILY INTELLIGENCE", ["morning-brief", "attention", "breaking", "patterns"]),
+    ("🎬 CONTENT ENGINE",     ["content-queue", "content-output", "content-review"]),
+    ("📊 FEEDBACK LOOP",      ["performance", "wins", "misses"]),
+    ("⚙️ SYSTEM",             ["alerts", "system-logs"]),
 ]
-# Channels that should be private (deny @everyone view)
-PRIVATE_CHANNELS = {"ideas"}
+# No private channels in the new structure
+PRIVATE_CHANNELS: set[str] = set()
 
 # Flat list of all channel names (for backward-compat references)
 CHANNEL_ORDER = [ch for _, chs in CATEGORIES for ch in chs]
