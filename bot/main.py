@@ -1968,49 +1968,117 @@ async def _owner_query_task(bot_token: str) -> None:
                 if not query:
                     continue
 
-                # Build context from RSS + brief
-                rss_ctx = load_rss_context_for_brief()
-                context_snippet = rss_ctx[:1500] if rss_ctx else "No RSS context available today."
-
-                # Haiku call to answer the query
-                try:
-                    import httpx as _httpx
-                    resp = await _httpx.AsyncClient(timeout=20.0).__aenter__()
-                    response = await resp.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "x-api-key":         settings.anthropic_api_key,
-                            "anthropic-version": "2023-06-01",
-                            "content-type":      "application/json",
-                        },
-                        json={
-                            "model":      settings.claude_fallback_model,
-                            "max_tokens": 400,
-                            "messages":   [{
-                                "role":    "user",
-                                "content": (
-                                    f"You are Kal, a causal intelligence system. "
-                                    f"Answer this query from your CEO using today's intelligence context.\n\n"
-                                    f"Query: {query}\n\n"
-                                    f"Today's intelligence context:\n{context_snippet}\n\n"
-                                    f"Answer in 3-5 sentences. Be specific and direct."
-                                ),
-                            }],
-                        },
-                    )
-                    await resp.__aexit__(None, None, None)
-                    answer = response.json()["content"][0]["text"].strip()
-                except Exception as haiku_exc:
-                    log.warning("owner_query_haiku_failed", error=str(haiku_exc))
-                    answer = f"I couldn't process that query right now (API error). Try again shortly."
-
+                import owner_commands as _oc
                 import discord_notifier as _discord
-                await _discord.notify_owner_response(f"**Kal response to:** *{query}*\n\n{answer}")
+
+                # Try structured command dispatch first
+                answer = await _oc.dispatch(
+                    query,
+                    sb_url=settings.supabase_url,
+                    sb_key=settings.supabase_service_role_key,
+                    storyforge_url=getattr(settings, "storyforge_url", ""),
+                    storyforge_key=getattr(settings, "storyforge_api_key", ""),
+                )
+
+                # Unrecognised command — fall back to generic Haiku response
+                if answer is None:
+                    rss_ctx = load_rss_context_for_brief()
+                    context_snippet = rss_ctx[:1500] if rss_ctx else "No RSS context available today."
+                    try:
+                        import httpx as _httpx
+                        async with _httpx.AsyncClient(timeout=20.0) as _hx:
+                            _resp = await _hx.post(
+                                "https://api.anthropic.com/v1/messages",
+                                headers={
+                                    "x-api-key":         settings.anthropic_api_key,
+                                    "anthropic-version": "2023-06-01",
+                                    "content-type":      "application/json",
+                                },
+                                json={
+                                    "model":      settings.claude_fallback_model,
+                                    "max_tokens": 400,
+                                    "messages":   [{
+                                        "role":    "user",
+                                        "content": (
+                                            f"You are Kal, a causal intelligence system. "
+                                            f"Answer this query from your CEO using today's intelligence context.\n\n"
+                                            f"Query: {query}\n\n"
+                                            f"Today's intelligence context:\n{context_snippet}\n\n"
+                                            f"Answer in 3-5 sentences. Be specific and direct."
+                                        ),
+                                    }],
+                                },
+                            )
+                        answer = _resp.json()["content"][0]["text"].strip()
+                    except Exception as haiku_exc:
+                        log.warning("owner_query_haiku_failed", error=str(haiku_exc))
+                        answer = "I couldn't process that query right now (API error). Try again shortly."
+
+                await _discord.notify_owner_response(f"**Kal:** *{query}*\n\n{answer}")
                 _owner_query_count_today += 1
                 log.info("owner_query_answered", query=query[:60], count=_owner_query_count_today)
 
         except Exception as exc:
             log.warning("owner_query_task_error", error=str(exc))
+
+
+# ── Daily QA scan task ───────────────────────────────────────────────────────
+
+async def _daily_qa_task(bot_token: str) -> None:
+    """
+    Run the daily QA scan once at 9pm ET.
+    Scans all Discord channels for duplicate bot posts and stale data references.
+    Posts a single summary to #system-logs.
+    """
+    if not bot_token:
+        return
+
+    from discord_bot import DiscordBot
+    from market_qa import run_daily_qa_scan
+    import discord_notifier as _discord
+
+    bot = DiscordBot(bot_token)
+    # Give startup a moment to complete so channel IDs are registered
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            # Sleep until 9pm ET today (or tomorrow if already past 9pm)
+            try:
+                from zoneinfo import ZoneInfo
+                now_et = datetime.datetime.now(ZoneInfo("America/New_York"))
+            except (ImportError, KeyError):
+                now_et = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
+
+            target = now_et.replace(hour=21, minute=0, second=0, microsecond=0)
+            if now_et >= target:
+                target += datetime.timedelta(days=1)
+
+            wait_secs = (target - now_et).total_seconds()
+            log.debug("daily_qa_task sleeping %.0f seconds until 9pm ET", wait_secs)
+            await asyncio.sleep(wait_secs)
+
+            # Resolve channel IDs from the notifier's bot instance
+            import discord_notifier as _dn
+            if _dn._bot is not None:
+                channel_ids = _dn._bot._channel_ids
+            else:
+                # Fallback: resolve fresh
+                guild_id = await bot.get_guild_id()
+                raw_channels = await bot._list_channels(guild_id)
+                channel_ids = {
+                    c["name"]: int(c["id"])
+                    for c in raw_channels
+                    if c.get("type") == 0
+                }
+
+            summary = await run_daily_qa_scan(bot, channel_ids)
+            await _discord.notify_daily_qa_report(summary)
+            log.info("daily_qa_scan_complete", summary=summary[:100])
+
+        except Exception as exc:
+            log.warning("daily_qa_task_error", error=str(exc))
+            await asyncio.sleep(3600)  # retry in 1 hour on error
 
 
 # ── Startup credit probe ──────────────────────────────────────────────────────
@@ -2314,6 +2382,7 @@ async def main_async() -> None:
             asyncio.create_task(_market_close_task(model_override_fn=_model_override_fn))
             asyncio.create_task(_attention_task(attention_engine))
             asyncio.create_task(_owner_query_task(_bot_token))
+            asyncio.create_task(_daily_qa_task(_bot_token))
             # Keep process alive
             while True:
                 await asyncio.sleep(3600)
@@ -2364,6 +2433,7 @@ async def main_async() -> None:
             credit_check_task = asyncio.create_task(_credit_check_task())
             attention_task    = asyncio.create_task(_attention_task(attention_engine))
             owner_query_task  = asyncio.create_task(_owner_query_task(_bot_token))
+            daily_qa_task_bg  = asyncio.create_task(_daily_qa_task(_bot_token))
 
             async def paper_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)
@@ -2444,6 +2514,7 @@ async def main_async() -> None:
             credit_check_task = asyncio.create_task(_credit_check_task())
             attention_task    = asyncio.create_task(_attention_task(attention_engine))
             owner_query_task  = asyncio.create_task(_owner_query_task(_bot_token))
+            daily_qa_task_bg  = asyncio.create_task(_daily_qa_task(_bot_token))
 
             async def live_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)

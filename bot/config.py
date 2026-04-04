@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # ── Intelligence Scanner ──────────────────────────────────────────────────
     intelligence_scan_interval: int = Field(default=30, description="Intelligence scanner interval in minutes")
 
+    # ── Market QA + Content ───────────────────────────────────────────────────
+    polygon_api_key:   str = Field(default="", description="Polygon.io free API key — market status check")
+    storyforge_url:    str = Field(default="", description="Storyforge base URL — e.g. https://app.storyforge.io")
+    storyforge_api_key: str = Field(default="", description="Storyforge API key for /api/v2/generate")
+
     # ── Trading Pause ─────────────────────────────────────────────────────────
     trading_paused: bool = Field(default=False, description="When true: skip all market scanning. Intelligence pipeline (RSS, brief, attention, patterns) keeps running.")
 

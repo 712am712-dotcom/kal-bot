@@ -117,6 +117,39 @@ def _get_webhook(channel: str) -> str | None:
     return fallback or None
 
 
+async def _inject_market_note(channel: str, payload: dict) -> dict:
+    """
+    Append market-status / holiday context to financial-channel payloads.
+    Returns the (possibly modified) payload. Never raises.
+
+    Applied to: morning-brief, attention, breaking, patterns, content-queue.
+    Uses a 30-min cached Polygon status check — no blocking on every send.
+    """
+    try:
+        from market_qa import FINANCIAL_CHANNELS, get_market_status_note
+        if channel not in FINANCIAL_CHANNELS:
+            return payload
+        api_key = getattr(settings, "polygon_api_key", "")
+        note = await get_market_status_note(api_key)
+        if not note:
+            return payload
+
+        # Deep-copy to avoid mutating the caller's dict
+        import copy
+        payload = copy.deepcopy(payload)
+
+        # Append to embed description if present, else to content
+        if payload.get("embeds"):
+            embed = payload["embeds"][0]
+            desc = embed.get("description", "")
+            embed["description"] = f"{desc}\n\n_{note}_".lstrip()
+        elif payload.get("content"):
+            payload["content"] = f"{payload['content']}\n\n_{note}_"
+    except Exception as exc:
+        log.debug("[discord] market_note inject failed: %s", exc)
+    return payload
+
+
 async def _discord_raw(channel: str, payload: dict) -> None:
     """
     Raw Discord send — bot API first, then webhook. Raises on failure
@@ -129,6 +162,9 @@ async def _discord_raw(channel: str, payload: dict) -> None:
     """
     # ── Remap legacy channel names to new structure ───────────────────────────
     channel = _CHANNEL_ALIAS.get(channel, channel)
+
+    # ── Inject market status / holiday note for financial channels ────────────
+    payload = await _inject_market_note(channel, payload)
 
     # ── 1. Bot API ────────────────────────────────────────────────────────────
     if _bot is not None:
@@ -1427,6 +1463,11 @@ async def notify_system_log(message: str) -> None:
 async def notify_owner_response(response: str) -> None:
     """Post Kal's response to an owner `Kal:` query in #system-logs."""
     await _send("system-logs", {"content": response, "username": KAL})
+
+
+async def notify_daily_qa_report(summary: str) -> None:
+    """Post the daily QA scan summary to #system-logs."""
+    await _send("system-logs", {"content": f"**{summary}**", "username": KAL})
 
 
 async def send_channel_guide() -> None:
