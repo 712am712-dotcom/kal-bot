@@ -266,7 +266,11 @@ async def _haiku_attention_signal(
     """
     headlines = "\n".join(f"- {t}" for t in titles[:5])
     prompt = (
-        f"You are Kal, a causal intelligence system for {NICHE} content.\n\n"
+        f"You are an expert AI content strategist who has grown AI education pages "
+        f"to 1M+ followers. Your job is to identify which AI news stories will perform "
+        f"best as Instagram carousel content for a beginner audience — people who are "
+        f"curious about AI but have no technical background. You prioritise stories that "
+        f"are concrete, timely, and have a clear 'so what' for everyday life.\n\n"
         f"Topic: {topic}\n"
         f"Signal score: {score}/10\n"
         f"Headlines:\n{headlines}\n\n"
