@@ -266,22 +266,36 @@ async def _haiku_attention_signal(
     """
     headlines = "\n".join(f"- {t}" for t in titles[:5])
     prompt = (
-        f"You are an expert AI content strategist who has grown AI education pages "
-        f"to 1M+ followers. Your job is to identify which AI news stories will perform "
-        f"best as Instagram carousel content for a beginner audience — people who are "
-        f"curious about AI but have no technical background. You prioritise stories that "
-        f"are concrete, timely, and have a clear 'so what' for everyday life.\n\n"
+        f"You are an expert AI content strategist who has grown "
+        f"multiple AI education pages to 1M+ followers.\n\n"
+        f"Your goal: Identify AI news stories with the highest "
+        f"probability of performing as viral Instagram carousel "
+        f"content for a beginner audience aged 18-35.\n\n"
+        f"Process (follow this exactly):\n"
+        f"1. Analyze the story\n"
+        f"2. Break down why it matters in simple terms\n"
+        f"3. Score it based on:\n"
+        f"   - novelty: is this new or already known? (1-10)\n"
+        f"   - clarity: can a beginner understand it? (1-10)\n"
+        f"   - emotional pull: curiosity, fear, or excitement? (1-10)\n"
+        f"   - shareability: would someone send this to a friend? (1-10)\n"
+        f"4. Generate 3 different hook angles (under 12 words each)\n"
+        f"5. Score each hook on the same criteria\n"
+        f"6. Select the best hook and explain why\n\n"
         f"Topic: {topic}\n"
         f"Signal score: {score}/10\n"
         f"Headlines:\n{headlines}\n\n"
         f"Today: {_now_et_str()}\n\n"
-        f"Classify this signal and respond with JSON only:\n"
+        f"Output as JSON (or return null if rejection criteria are met):\n"
         f"{{\n"
+        f'  "topic": "{topic[:80]}",\n'
         f'  "format": "A" | "B" | "C",\n'
-        f'  "hook": "<under 12 words — the sharpest angle on this topic>",\n'
+        f'  "final_score": <number 1-10>,\n'
+        f'  "hook": "<winning hook, under 12 words>",\n'
+        f'  "hook_reason": "<one sentence — why this hook wins>",\n'
         f'  "why_now": "new_release" | "trending" | "practical",\n'
         f'  "angle": "perspective_shift" | "economic_impact" | "conflict",\n'
-        f'  "why_matters": "<one sentence — why this matters right now>"\n'
+        f'  "niche": "AI"\n'
         f"}}\n\n"
         f"Format rules:\n"
         f"  A = concept / educational (explaining what something is or how it works)\n"
@@ -297,7 +311,12 @@ async def _haiku_attention_signal(
         f"  economic_impact   = topic involves cost, jobs, money, or industry disruption\n"
         f'    e.g. "What studios spend $200M on now costs $0"\n'
         f"  conflict          = topic involves displacement, competition, or a battle between forces\n"
-        f'    e.g. "The real battle isn\'t human vs AI — it\'s adaptation"'
+        f'    e.g. "The real battle isn\'t human vs AI — it\'s adaptation"\n\n'
+        f"REJECT (return null) if:\n"
+        f"- final_score below 6\n"
+        f"- hook is generic or over 12 words\n"
+        f"- why_now cannot be clearly classified\n"
+        f"- topic requires prior technical knowledge to understand"
     )
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -310,7 +329,7 @@ async def _haiku_attention_signal(
                 },
                 json={
                     "model":      model,
-                    "max_tokens": 300,
+                    "max_tokens": 500,
                     "messages":   [{"role": "user", "content": prompt}],
                 },
             )
@@ -320,8 +339,18 @@ async def _haiku_attention_signal(
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
+        text = text.strip()
+
+        # Haiku rejected the signal
+        if text.lower() == "null":
+            log.info("[attention] haiku_rejected topic=%s", topic[:60])
+            return None
+
         data = json.loads(text)
-        # Normalise / validate enum fields
+        if data is None:
+            return None
+
+        # Validate / normalise enum fields
         fmt = data.get("format", "C")
         if fmt not in ("A", "B", "C"):
             fmt = "C"
@@ -331,6 +360,10 @@ async def _haiku_attention_signal(
         angle = data.get("angle", "perspective_shift")
         if angle not in ("perspective_shift", "economic_impact", "conflict"):
             angle = "perspective_shift"
+        final_score = int(data.get("final_score", score))
+        if final_score < 6:
+            log.info("[attention] haiku_score_too_low final_score=%d topic=%s", final_score, topic[:60])
+            return None
         # Enforce hook length (truncate to 12 words)
         hook_words = data.get("hook", topic[:60]).split()
         hook = " ".join(hook_words[:12])
@@ -338,11 +371,12 @@ async def _haiku_attention_signal(
             "topic":       topic,
             "format":      fmt,
             "hook":        hook,
+            "hook_reason": data.get("hook_reason", ""),
             "why_now":     why_now,
             "angle":       angle,
-            "score":       score,
+            "score":       score,        # original topic score (pre-Haiku)
+            "final_score": final_score,  # Haiku's evaluated score
             "niche":       NICHE,
-            "why_matters": data.get("why_matters", ""),
         }
     except Exception as exc:
         log.warning("[attention] haiku_call_failed: %s", exc)
