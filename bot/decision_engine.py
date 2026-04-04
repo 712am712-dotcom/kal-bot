@@ -50,7 +50,7 @@ class DecisionEngine:
 
         log.info(
             "decision_engine_start",
-            market=analysis.ticker,
+            ticker=analysis.ticker,
             crowd_price=f"{analysis.kalshi_yes_price:.1%}",
             kal_estimate=f"{analysis.yes_probability:.1%}",
             edge=f"{analysis.edge:+.1%}",
@@ -60,7 +60,7 @@ class DecisionEngine:
 
         def _skip(reason: str) -> dict:
             decision["reason"] = reason
-            log.info("decision_engine_result", market=analysis.ticker, action="SKIP", reason=reason)
+            log.info("decision_engine_result", ticker=analysis.ticker, action="SKIP", reason=reason)
             return decision
 
         # Research mode — never place real trades
@@ -148,7 +148,7 @@ class DecisionEngine:
         )
         log.info(
             "decision_engine_result",
-            market=analysis.ticker,
+            ticker=analysis.ticker,
             action="TRADE",
             side=side,
             contracts=contracts,

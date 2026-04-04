@@ -79,7 +79,14 @@ class VectorMemory:
         Returns True if Pinecone is ready, False otherwise.
         """
         ok = self._init()
-        if not ok:
+        if ok:
+            from config import settings as _s
+            log.info(
+                "vector_memory_initialized",
+                index=getattr(_s, "pinecone_index", "kal-memory"),
+                status="connected",
+            )
+        else:
             log.warning(
                 "vector_memory_failed",
                 error="init_failed_check_PINECONE_API_KEY",

@@ -52,7 +52,21 @@ RSS_FEEDS: list[tuple[str, str]] = [
     ("Decrypt",           "https://decrypt.co/feed"),
     # Macro analysis
     ("Kobeissi Letter",   "https://thekobeissiletter.substack.com/feed"),
+    # AI-specific (auto-pass keyword filter, +3 signal score)
+    ("AI News",              "https://www.artificialintelligence-news.com/feed/"),
+    ("AI Newsletter",        "https://buttondown.email/ainews/rss"),
+    ("Algorithmic Bridge",   "https://www.thealgorithmicbridge.com/feed"),
+    ("AI Snake Oil",         "https://aisnakeoil.substack.com/feed"),
 ]
+
+# Sources that automatically pass the keyword filter and receive +3 signal score.
+# Articles from these sources get ai_specific=True in the context file.
+AI_SPECIFIC_SOURCES: set[str] = {
+    "AI News",
+    "AI Newsletter",
+    "Algorithmic Bridge",
+    "AI Snake Oil",
+}
 
 
 # ── Keyword filter lists ──────────────────────────────────────────────────────
@@ -579,6 +593,11 @@ Routing rules:
 
                 title    = article.get("title",       "")
                 desc     = article.get("description", "")
+                is_ai_specific = source_name in AI_SPECIFIC_SOURCES
+
+                # All sources go through the keyword filter.
+                # AI-specific sources get a score boost (+2) in attention_engine,
+                # not an auto-pass here.
                 priority = self._keyword_priority(title, desc)
 
                 # ── Skip: non-market content ──────────────────────────────
@@ -595,6 +614,7 @@ Routing rules:
                         "headline":     title,
                         "market_angle": "",
                         "url":          url,
+                        "ai_specific":  False,
                     })
                     asyncio.create_task(self._log_to_supabase(article, "context"))
                     continue
@@ -610,6 +630,7 @@ Routing rules:
                         "headline":     title,
                         "market_angle": "",
                         "url":          url,
+                        "ai_specific":  is_ai_specific,
                     })
                     asyncio.create_task(self._log_to_supabase(article, "high_budget_exhausted"))
                     continue
@@ -628,6 +649,7 @@ Routing rules:
                         "headline":     title,
                         "market_angle": "",
                         "url":          url,
+                        "ai_specific":  is_ai_specific,
                     })
                     asyncio.create_task(self._log_to_supabase(article, "high_eval_failed"))
                     continue
@@ -643,6 +665,7 @@ Routing rules:
                         "headline":     eval_result.get("headline") or title,
                         "market_angle": eval_result.get("market_angle", ""),
                         "url":          url,
+                        "ai_specific":  is_ai_specific,
                     })
 
                 # Post to Discord if warranted

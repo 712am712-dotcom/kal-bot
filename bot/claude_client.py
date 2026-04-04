@@ -12,10 +12,11 @@ import time
 from dataclasses import dataclass, field
 
 import anthropic
+import structlog
 
 from config import settings
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -552,7 +553,7 @@ class ClaudeClient:
         client = self._get_client()
         log.info(
             "claude_api_call_attempt",
-            market=ticker,
+            ticker=ticker,
             model=active_model,
             yes_price=f"{yes_price:.1%}",
             coin=coin or "N/A",
@@ -566,10 +567,10 @@ class ClaudeClient:
                 messages=[{"role": "user", "content": prompt}],
             )
         except Exception as _api_exc:
-            log.error("claude_api_call_failed", market=ticker, model=active_model, error=str(_api_exc))
+            log.error("claude_api_call_failed", ticker=ticker, model=active_model, error=str(_api_exc))
             raise
         latency_ms = int((time.monotonic() - start) * 1000)
-        log.info("claude_api_call_success", market=ticker, latency_ms=latency_ms,
+        log.info("claude_api_call_success", ticker=ticker, latency_ms=latency_ms,
                  in_tok=message.usage.input_tokens, out_tok=message.usage.output_tokens)
 
         # ── Parse response ────────────────────────────────────────────────────
