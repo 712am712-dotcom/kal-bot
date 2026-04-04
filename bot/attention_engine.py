@@ -260,6 +260,7 @@ async def _haiku_attention_signal(
       format   — "A" | "B" | "C"
       hook     — str, under 12 words
       why_now  — "new_release" | "trending" | "practical"
+      angle    — "perspective_shift" | "economic_impact" | "conflict"
       score    — int
       niche    — str (NICHE constant)
     """
@@ -275,8 +276,8 @@ async def _haiku_attention_signal(
         f'  "format": "A" | "B" | "C",\n'
         f'  "hook": "<under 12 words — the sharpest angle on this topic>",\n'
         f'  "why_now": "new_release" | "trending" | "practical",\n'
-        f'  "why_matters": "<one sentence — why this matters right now>",\n'
-        f'  "angle": "<best content angle — how to make this relatable/simple>"\n'
+        f'  "angle": "perspective_shift" | "economic_impact" | "conflict",\n'
+        f'  "why_matters": "<one sentence — why this matters right now>"\n'
         f"}}\n\n"
         f"Format rules:\n"
         f"  A = concept / educational (explaining what something is or how it works)\n"
@@ -285,7 +286,14 @@ async def _haiku_attention_signal(
         f"why_now rules:\n"
         f"  new_release  = product/model/paper just dropped\n"
         f"  trending     = gaining attention across multiple sources today\n"
-        f"  practical    = has immediate real-world use or implication"
+        f"  practical    = has immediate real-world use or implication\n\n"
+        f"angle rules:\n"
+        f"  perspective_shift = topic challenges a common belief or assumption\n"
+        f'    e.g. "AI isn\'t magic — it\'s just algorithms + data"\n'
+        f"  economic_impact   = topic involves cost, jobs, money, or industry disruption\n"
+        f'    e.g. "What studios spend $200M on now costs $0"\n'
+        f"  conflict          = topic involves displacement, competition, or a battle between forces\n"
+        f'    e.g. "The real battle isn\'t human vs AI — it\'s adaptation"'
     )
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -316,6 +324,9 @@ async def _haiku_attention_signal(
         why_now = data.get("why_now", "trending")
         if why_now not in ("new_release", "trending", "practical"):
             why_now = "trending"
+        angle = data.get("angle", "perspective_shift")
+        if angle not in ("perspective_shift", "economic_impact", "conflict"):
+            angle = "perspective_shift"
         # Enforce hook length (truncate to 12 words)
         hook_words = data.get("hook", topic[:60]).split()
         hook = " ".join(hook_words[:12])
@@ -324,10 +335,10 @@ async def _haiku_attention_signal(
             "format":      fmt,
             "hook":        hook,
             "why_now":     why_now,
+            "angle":       angle,
             "score":       score,
             "niche":       NICHE,
             "why_matters": data.get("why_matters", ""),
-            "angle":       data.get("angle", ""),
         }
     except Exception as exc:
         log.warning("[attention] haiku_call_failed: %s", exc)
