@@ -74,12 +74,18 @@ _ENTITY_MATCH: set[str] = {
     "chatgpt", "claude", "gpt-4", "gpt-5", "gemini", "openai",
     "anthropic", "llama", "mistral", "copilot", "perplexity",
     "ai agent", "large language model", "llm",
+    # Video / audio AI tools
+    "higgsfield", "seedance", "runway", "pika", "kling",
+    "sora", "veo", "invideo", "synthesia", "heygen",
+    "eleven labs", "elevenlabs",
 }
 
 _ACTION_WORDS: set[str] = {
     "released", "launched", "announced", "added", "update",
     "new", "banned", "acquired", "raised", "partnership",
     "replacing", "beats", "surpasses",
+    # Release-specific
+    "dropped", "just released", "now available", "benchmark",
 }
 
 # ── Daily state ───────────────────────────────────────────────────────────────
