@@ -207,14 +207,20 @@ class FredClient:
         if oil_wti is not None:
             ok, _ = check_price_sanity("WTI Crude", oil_wti)
             if not ok:
-                oil_wti = None   # suppressed — value failed sanity check
+                oil_wti = None
+
+        gold = data.get("gold")
+        if gold is not None:
+            ok, _ = check_price_sanity("Gold", gold)
+            if not ok:
+                gold = None
 
         lines = [
             "**KEY ECONOMIC DATA:**",
             f"- CPI inflation: {self._pct(data.get('cpi'), decimals=1)}",
             f"- Unemployment: {self._pct(data.get('unemployment'), decimals=1)}",
             f"- WTI Crude: {self._dollar(oil_wti)}",
-            f"- Gold: {self._dollar(data.get('gold'))}",
+            f"- Gold: {self._dollar(gold)}",
         ]
         return "\n".join(lines)
 

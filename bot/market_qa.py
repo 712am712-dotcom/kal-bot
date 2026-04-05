@@ -34,9 +34,10 @@ log = logging.getLogger(__name__)
 #
 # Format: asset_key → (low, high)
 _PRICE_RANGES: dict[str, tuple[float, float]] = {
-    "WTI Crude":   (50.0,   150.0),
-    "Brent Crude": (50.0,   155.0),
-    "S&P 500":     (2000.0, 7000.0),
+    "WTI Crude":   (50.0,    200.0),
+    "Brent Crude": (50.0,    210.0),
+    "S&P 500":     (2000.0,  8000.0),
+    "Gold":        (1500.0,  8000.0),
     "BTC":         (10_000.0, 200_000.0),
     "Bitcoin":     (10_000.0, 200_000.0),
 }
