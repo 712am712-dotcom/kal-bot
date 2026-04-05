@@ -27,6 +27,50 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+# ── Price sanity checks ───────────────────────────────────────────────────────
+#
+# Valid ranges for assets Kal reports. Values outside these bounds are
+# flagged and suppressed before posting. Update ranges annually.
+#
+# Format: asset_key → (low, high)
+_PRICE_RANGES: dict[str, tuple[float, float]] = {
+    "WTI Crude":   (50.0,   150.0),
+    "Brent Crude": (50.0,   155.0),
+    "S&P 500":     (2000.0, 7000.0),
+    "BTC":         (10_000.0, 200_000.0),
+    "Bitcoin":     (10_000.0, 200_000.0),
+}
+
+
+def check_price_sanity(asset: str, value: float) -> tuple[bool, str]:
+    """
+    Validate that a price falls within the expected range for its asset.
+
+    Returns (True, "ok") if valid, or (False, log_message) if outside range.
+    The caller is responsible for suppressing the value and logging on failure.
+
+    Usage:
+        ok, msg = check_price_sanity("WTI Crude", price)
+        if not ok:
+            log.warning("[qa] %s", msg)
+            price = None  # suppress
+    """
+    bounds = _PRICE_RANGES.get(asset)
+    if bounds is None:
+        return True, "ok"   # no range defined — pass through
+
+    low, high = bounds
+    if low <= value <= high:
+        return True, "ok"
+
+    msg = (
+        f"price_sanity_failed asset={asset} value={value:.2f} "
+        f"expected_range=${low:,.0f}-${high:,.0f}"
+    )
+    log.warning("[market_qa] %s", msg)
+    return False, msg
+
+
 # ── Financial channels that receive market-status context ─────────────────────
 FINANCIAL_CHANNELS: frozenset[str] = frozenset({
     "morning-brief",

@@ -204,7 +204,7 @@ def get_running_themes() -> list[str]:
 # ── Alpha Vantage helpers ─────────────────────────────────────────────────────
 
 async def _fetch_av_quote(symbol: str, av_key: str) -> float | None:
-    """Fetch a daily close price from Alpha Vantage."""
+    """Fetch a daily close price from Alpha Vantage (used for Gold ETF proxy only)."""
     if not av_key:
         return None
     url = "https://www.alphavantage.co/query"
@@ -224,6 +224,76 @@ async def _fetch_av_quote(symbol: str, av_key: str) -> float | None:
     except Exception as exc:
         log.debug("[snapshot] AV %s failed: %s", symbol, exc)
         return None
+
+
+# ── Live crude oil prices (Polygon.io) ───────────────────────────────────────
+
+async def _fetch_polygon_prev_close(ticker: str, api_key: str) -> float | None:
+    """
+    Fetch previous-day close for a Polygon ticker (works for C:WTICOUSD, C:BCOUSD).
+    Free tier supports /v2/aggs/ticker/{ticker}/prev.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(
+                f"https://api.polygon.io/v2/aggs/ticker/{ticker}/prev",
+                params={"apiKey": api_key},
+            )
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            if results:
+                return float(results[0].get("c") or results[0].get("vw") or 0) or None
+        log.debug("[snapshot] polygon %s HTTP %d", ticker, r.status_code)
+        return None
+    except Exception as exc:
+        log.debug("[snapshot] polygon %s failed: %s", ticker, exc)
+        return None
+
+
+async def fetch_crude_prices(
+    polygon_api_key: str,
+    fred_wti_fallback: float | None = None,
+) -> dict[str, float | None]:
+    """
+    Fetch live WTI and Brent crude oil prices from Polygon.io.
+    Falls back to the FRED DCOILWTICO value for WTI only if Polygon fails.
+    Returns {"wti": float|None, "brent": float|None}.
+
+    Polygon tickers used:
+      C:WTICOUSD — WTI crude oil spot (USD)
+      C:BCOUSD   — Brent crude oil spot (USD)
+    """
+    from market_qa import check_price_sanity
+
+    wti, brent = None, None
+
+    if polygon_api_key:
+        import asyncio as _asyncio
+        wti_raw, brent_raw = await _asyncio.gather(
+            _fetch_polygon_prev_close("C:WTICOUSD", polygon_api_key),
+            _fetch_polygon_prev_close("C:BCOUSD",   polygon_api_key),
+        )
+        wti   = wti_raw
+        brent = brent_raw
+
+    # Fallback for WTI: FRED (slightly stale but reliable)
+    if wti is None and fred_wti_fallback is not None:
+        wti = fred_wti_fallback
+        log.debug("[snapshot] using FRED fallback for WTI: %.2f", wti)
+
+    # Sanity-check before returning
+    if wti is not None:
+        ok, msg = check_price_sanity("WTI Crude", wti)
+        if not ok:
+            log.warning("[snapshot] %s — suppressing WTI price", msg)
+            wti = None
+    if brent is not None:
+        ok, msg = check_price_sanity("Brent Crude", brent)
+        if not ok:
+            log.warning("[snapshot] %s — suppressing Brent price", msg)
+            brent = None
+
+    return {"wti": wti, "brent": brent}
 
 
 # ── Finnhub overnight news ────────────────────────────────────────────────────
@@ -361,6 +431,7 @@ async def build_market_open(
     fred_api_key: str,
     finnhub_api_key: str,
     av_key: str,
+    polygon_api_key: str = "",
 ) -> str:
     """
     Build the market open post. Pure data — zero Claude calls.
@@ -375,17 +446,17 @@ async def build_market_open(
     crypto_task    = _fetch_kraken_prices()
     fred_task      = fred.get_all()
     gold_task      = _fetch_av_quote("GLD", av_key)   # GLD ETF ≈ gold
-    oil_task       = _fetch_av_quote("USO", av_key)   # USO ≈ WTI oil proxy
     dxy_task       = _fetch_av_quote("UUP", av_key)   # UUP ≈ dollar index proxy
     overnight_task = _fetch_overnight_headline(finnhub_api_key)
 
-    crypto, fred_data, gold_raw, oil_raw, dxy_raw, overnight = await asyncio.gather(
-        crypto_task, fred_task, gold_task, oil_task, dxy_task, overnight_task
+    crypto, fred_data, gold_raw, dxy_raw, overnight = await asyncio.gather(
+        crypto_task, fred_task, gold_task, dxy_task, overnight_task
     )
 
-    # Use FRED gold/oil if AV unavailable
+    # Crude oil: live Polygon prices with FRED fallback (replaces USO ETF proxy)
+    crude = await fetch_crude_prices(polygon_api_key, fred_wti_fallback=fred_data.get("oil_wti"))
+
     gold = gold_raw or fred_data.get("gold")
-    oil  = oil_raw  or fred_data.get("oil_wti")
 
     date_str = _et_now()
 
@@ -402,11 +473,12 @@ async def build_market_open(
     )
     lines.append(crypto_line)
 
-    # Macro line
-    gold_str = _fmt_price(gold)
-    oil_str  = _fmt_price(oil)
-    dxy_str  = f"{dxy_raw:.1f}" if dxy_raw else "N/A"
-    macro_line = f"Macro: Gold {gold_str} | Oil {oil_str} | Dollar index {dxy_str}"
+    # Macro line — labeled WTI / Brent, not a generic "Oil" proxy
+    wti_str   = f"WTI Crude: {_fmt_price(crude['wti'], decimals=2)}"
+    brent_str = f"Brent Crude: {_fmt_price(crude['brent'], decimals=2)}"
+    gold_str  = _fmt_price(gold)
+    dxy_str   = f"{dxy_raw:.1f}" if dxy_raw else "N/A"
+    macro_line = f"Macro: Gold {gold_str} | {wti_str} | {brent_str} | Dollar index {dxy_str}"
     lines.append(macro_line)
 
     # Bonds line
@@ -467,13 +539,16 @@ async def build_market_close(
     crypto_task    = _fetch_kraken_prices()
     fred_task      = fred.get_all()
     gold_task      = _fetch_av_quote("GLD", av_key)
-    oil_task       = _fetch_av_quote("USO", av_key)
     headlines_task = _fetch_today_headlines(finnhub_api_key)
     trades_task    = _fetch_todays_trades(supabase_url, supabase_key)
 
-    crypto, fred_data, gold_raw, oil_raw, headlines, trades = await asyncio.gather(
-        crypto_task, fred_task, gold_task, oil_task, headlines_task, trades_task
+    crypto, fred_data, gold_raw, headlines, trades = await asyncio.gather(
+        crypto_task, fred_task, gold_task, headlines_task, trades_task
     )
+
+    # Crude oil: live Polygon prices with FRED fallback (replaces USO ETF proxy)
+    polygon_key = getattr(__import__("config", fromlist=["settings"]).settings, "polygon_api_key", "")
+    crude = await fetch_crude_prices(polygon_key, fred_wti_fallback=fred_data.get("oil_wti"))
 
     yesterday_lesson  = get_yesterday_lesson()
     themes            = get_running_themes()
@@ -482,7 +557,6 @@ async def build_market_close(
     # Build the Claude prompt
     date_str = _et_now()
     gold = gold_raw or fred_data.get("gold")
-    oil  = oil_raw  or fred_data.get("oil_wti")
 
     btc  = crypto.get("BTC", {})
     eth  = crypto.get("ETH", {})
@@ -497,7 +571,8 @@ async def build_market_close(
         f"Ethereum: {_fmt_price(eth.get('price'))} {_fmt_chg(eth.get('change_24h'))}",
         f"Solana: {_fmt_price(sol.get('price'), 2)} {_fmt_chg(sol.get('change_24h'))}",
         f"Gold: {_fmt_price(gold)}",
-        f"Oil (WTI proxy): {_fmt_price(oil)}",
+        f"WTI Crude: {_fmt_price(crude['wti'], decimals=2)}",
+        f"Brent Crude: {_fmt_price(crude['brent'], decimals=2)}",
     ]
 
     if fred_data:

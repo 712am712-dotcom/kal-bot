@@ -2212,7 +2212,10 @@ async def _market_open_task() -> None:
             if market_open_already_posted():
                 continue
 
-            content = await build_market_open(fred_key, finnhub_key, av_key)
+            content = await build_market_open(
+                fred_key, finnhub_key, av_key,
+                polygon_api_key=getattr(settings, "polygon_api_key", ""),
+            )
             await discord.notify_market_open(content)
             mark_open_posted()
             log.info("[open_task] market open posted")

@@ -201,11 +201,19 @@ class FredClient:
 
     def format_macro_block(self, data: dict) -> str:
         """Format the KEY ECONOMIC DATA section."""
+        from market_qa import check_price_sanity
+
+        oil_wti = data.get("oil_wti")
+        if oil_wti is not None:
+            ok, _ = check_price_sanity("WTI Crude", oil_wti)
+            if not ok:
+                oil_wti = None   # suppressed — value failed sanity check
+
         lines = [
             "**KEY ECONOMIC DATA:**",
             f"- CPI inflation: {self._pct(data.get('cpi'), decimals=1)}",
             f"- Unemployment: {self._pct(data.get('unemployment'), decimals=1)}",
-            f"- Oil (WTI): {self._dollar(data.get('oil_wti'))}",
+            f"- WTI Crude: {self._dollar(oil_wti)}",
             f"- Gold: {self._dollar(data.get('gold'))}",
         ]
         return "\n".join(lines)
