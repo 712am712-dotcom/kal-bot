@@ -562,7 +562,7 @@ async def evaluate_axios_alert(
         raw = response.content[0].text.strip()
         inp = response.usage.input_tokens
         out = response.usage.output_tokens
-        cost = inp * 0.000003 + out * 0.000015
+        cost = inp * 0.000015 + out * 0.000075
         log.info("[axios-alert] evaluated tokens=%d+%d cost=$%.4f ms=%d",
                  inp, out, cost, round((time.time() - t0) * 1000))
 

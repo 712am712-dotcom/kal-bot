@@ -464,7 +464,8 @@ Routing rules:
 
         try:
             import anthropic
-            model  = model_override or self._model
+            # RSS eval is a filtering/routing task — Sonnet is sufficient, Opus is overkill
+            model  = model_override or "claude-sonnet-4-6"
             client = anthropic.Anthropic(api_key=self._api_key)
             resp   = client.messages.create(
                 model=model,
