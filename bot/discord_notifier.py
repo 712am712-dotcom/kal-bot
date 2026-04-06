@@ -1478,6 +1478,9 @@ async def notify_content_opportunity(signal_data: dict) -> None:
     if is_foundation:
         header = "📚 FOUNDATION"
         score_line = f"FORMAT: {fmt} | ANGLE: {angle} | WHY NOW: {why_now}"
+    elif fmt == "D":
+        header = "🔥 COMMUNITY BUILDERS"
+        score_line = f"FORMAT: D | ANGLE: {angle} | WHY NOW: {why_now} | SCORE: {score}/10"
     else:
         header = "📰 SIGNAL DETECTED"
         score_line = f"FORMAT: {fmt} | ANGLE: {angle} | WHY NOW: {why_now} | SCORE: {score}/10"
@@ -1490,6 +1493,19 @@ async def notify_content_opportunity(signal_data: dict) -> None:
         "",
         f"**HOOK:** {hook}",
         "",
+    ]
+
+    # COMMUNITY PROOF block — format D only
+    community_proof = signal_data.get("community_proof") or []
+    if fmt == "D" and community_proof:
+        lines.append("**COMMUNITY PROOF:**")
+        for i, entry in enumerate(community_proof[:3], start=1):
+            build  = entry.get("build", "")
+            metric = entry.get("metric", "")
+            lines.append(f"Example {i}: {build} — {metric}")
+        lines.append("")
+
+    lines += [
         "**SLIDES:**",
         slides_block,
         "",

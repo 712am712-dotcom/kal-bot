@@ -100,10 +100,11 @@ _foundation_posted_today: bool = False
 _last_attention_check_ts: float = 0.0
 _ATTENTION_MIN_INTERVAL   = 90 * 60   # at least 90 min between attention checks
 
-# Per-format daily slot tracking (max 1 per format, 3 total)
+# Per-format daily slot tracking (max 1 per format, 4 total)
 _slot_a_used: bool = False   # concept / educational
 _slot_b_used: bool = False   # tool / product
 _slot_c_used: bool = False   # news / event
+_slot_d_used: bool = False   # community builders
 
 MAX_ATTENTION_PER_DAY = 3   # across windows 1 + 3
 
@@ -153,7 +154,7 @@ def _now_et_str() -> str:
 
 def _reset_daily_state() -> None:
     global _attention_posts_today, _attention_date, _pattern_posted_today, _pattern_date
-    global _slot_a_used, _slot_b_used, _slot_c_used, _foundation_posted_today
+    global _slot_a_used, _slot_b_used, _slot_c_used, _slot_d_used, _foundation_posted_today
     today = _today_et()
     if _attention_date != today:
         _attention_posts_today = 0
@@ -161,6 +162,7 @@ def _reset_daily_state() -> None:
         _slot_a_used = False
         _slot_b_used = False
         _slot_c_used = False
+        _slot_d_used = False
         _foundation_posted_today = False
     if _pattern_date != today:
         _pattern_posted_today = False
@@ -377,6 +379,17 @@ REJECTED EXAMPLES:
 - "AI as Normal Technology"
 - "Why Prompt Engineering Matters"
 
+COMMUNITY_BUILDERS CHECK — before choosing format, evaluate:
+Does this topic involve a major AI model/tool released within the last 5 days AND do you know of
+real community builds (things people have actually made with it, with engagement signals like
+likes/retweets)? If YES → use format D. If NO → use A/B/C as normal.
+
+FORMAT D REJECTION CRITERIA (in addition to global rejections above):
+- Cannot name at least 3 specific, distinct things people actually built with this tool
+- Engagement signals are weak or unknown (< 1000 likes equivalent)
+- Examples are vague ("someone used it for work"), repetitive, or unimpressive
+- Release is older than 5 days
+
 OUTPUT (return null if rejected, otherwise this exact JSON):
 {{
   "title": "<specific topic with real entity/event — not generic>",
@@ -384,18 +397,23 @@ OUTPUT (return null if rejected, otherwise this exact JSON):
   "hook_reason": "<one sentence — why this hook wins over the other two>",
   "slides": [
     "Slide 1: <real media instruction — grab screenshot of X, use clip from Y, show the actual announcement>",
-    "Slide 2: <specific point about what happened>",
-    "Slide 3: <specific point about why it matters>",
-    "Slide 4: <specific point about the implication or who is affected>",
-    "Slide 5: <payoff — what this means for the viewer, what changes now>",
+    "Slide 2: <community proof example 1 — what was built, specific output, engagement metric>",
+    "Slide 3: <community proof example 2 — what was built, specific output, engagement metric>",
+    "Slide 4: <community proof example 3 — what was built, specific output, engagement metric>",
+    "Slide 5: <implication — what this speed/capability shift means, what's now possible>",
     "Slide 6: Follow @artificialeducation — <punchy CTA related to topic>"
+  ],
+  "community_proof": [
+    {{"build": "<specific thing built — tool used, what was created, who built it>", "metric": "<engagement: e.g. 4.2K likes, 800 retweets>"}},
+    {{"build": "<specific thing built>", "metric": "<engagement>"}},
+    {{"build": "<specific thing built>", "metric": "<engagement>"}}
   ],
   "caption": "<full ready-to-paste caption — mobile format, short lines, no educational tone, punchy, 150-300 words, ends with question or CTA>",
   "image_prompts": {{
     "slide_1": "real media — <specific instruction: screenshot of [X], clip from [Y], or photo of [event]>",
     "slides_2_6": "Kodachrome film still, <subject related to slide content>, <mood>, cinematic hyperrealistic, motion blur, anti aliasing, lens distortion, color accent lighting, 2020s, no text, no watermark, vertical format, gorgeous, highly detailed"
   }},
-  "format": "A" | "B" | "C",
+  "format": "A" | "B" | "C" | "D",
   "angle": "perspective_shift" | "economic_impact" | "conflict",
   "why_now": "new_release" | "trending" | "practical",
   "final_score": <integer 7-10>
@@ -405,6 +423,10 @@ FORMAT RULES:
   A = concept/educational (explaining what something is or how it works)
   B = tool/product release (specific software, model, product drop)
   C = news/event (regulatory, business news, geopolitical, trending story)
+  D = community builders (major recent release + 3 real builds with strong engagement)
+    — slides 2-4 MUST be the community proof examples
+    — slides 5-6 are implication + CTA
+    — community_proof field is REQUIRED for format D; omit it for A/B/C
 
 ANGLE RULES:
   perspective_shift — challenges a common belief ("AI isn't going to take your job. AI users are.")
@@ -444,7 +466,7 @@ ANGLE RULES:
 
         # Validate / normalise enum fields
         fmt = data.get("format", "C")
-        if fmt not in ("A", "B", "C"):
+        if fmt not in ("A", "B", "C", "D"):
             fmt = "C"
         why_now = data.get("why_now", "trending")
         if why_now not in ("new_release", "trending", "practical"):
@@ -456,6 +478,22 @@ ANGLE RULES:
         if final_score < 7:
             log.info("[attention] haiku_score_too_low final_score=%d topic=%s", final_score, topic[:60])
             return None
+
+        # Format D: validate community_proof has 3 entries with real builds + metrics
+        community_proof: list[dict] = []
+        if fmt == "D":
+            raw_proof = data.get("community_proof") or []
+            if not isinstance(raw_proof, list):
+                raw_proof = []
+            for entry in raw_proof[:3]:
+                build  = (entry.get("build") or "").strip()
+                metric = (entry.get("metric") or "").strip()
+                if build and metric:
+                    community_proof.append({"build": build, "metric": metric})
+            if len(community_proof) < 3:
+                log.info("[attention] community_builders_rejected insufficient_proof=%d topic=%s",
+                         len(community_proof), topic[:60])
+                return None
 
         # Enforce hook length (truncate to 12 words)
         hook_words = (data.get("hook") or topic[:60]).split()
@@ -469,19 +507,20 @@ ANGLE RULES:
             slides.append("")
 
         return {
-            "topic":         topic,
-            "title":         data.get("title", topic[:80]),
-            "format":        fmt,
-            "hook":          hook,
-            "hook_reason":   data.get("hook_reason", ""),
-            "slides":        slides[:6],
-            "caption":       data.get("caption", ""),
-            "image_prompts": data.get("image_prompts", {}),
-            "why_now":       why_now,
-            "angle":         angle,
-            "score":         score,
-            "final_score":   final_score,
-            "niche":         NICHE,
+            "topic":           topic,
+            "title":           data.get("title", topic[:80]),
+            "format":          fmt,
+            "hook":            hook,
+            "hook_reason":     data.get("hook_reason", ""),
+            "slides":          slides[:6],
+            "community_proof": community_proof,   # [] for A/B/C, 3 entries for D
+            "caption":         data.get("caption", ""),
+            "image_prompts":   data.get("image_prompts", {}),
+            "why_now":         why_now,
+            "angle":           angle,
+            "score":           score,
+            "final_score":     final_score,
+            "niche":           NICHE,
         }
     except Exception as exc:
         log.warning("[attention] haiku_call_failed: %s", exc)
@@ -734,7 +773,7 @@ class AttentionEngine:
           4. Iterate candidates: Haiku → postability validation → slot check → post
         """
         global _attention_posts_today, _attention_date, _last_attention_check_ts
-        global _slot_a_used, _slot_b_used, _slot_c_used
+        global _slot_a_used, _slot_b_used, _slot_c_used, _slot_d_used
 
         _reset_daily_state()
 
@@ -814,6 +853,9 @@ class AttentionEngine:
             if fmt == "C" and _slot_c_used:
                 log.debug("[attention] format C slot full — trying next")
                 continue
+            if fmt == "D" and _slot_d_used:
+                log.debug("[attention] format D slot full — trying next")
+                continue
 
             # ── Post to #attention and #content-queue ─────────────────────────
             await discord.notify_attention_signal(
@@ -830,6 +872,8 @@ class AttentionEngine:
                 _slot_a_used = True
             elif fmt == "B":
                 _slot_b_used = True
+            elif fmt == "D":
+                _slot_d_used = True
             else:
                 _slot_c_used = True
 
