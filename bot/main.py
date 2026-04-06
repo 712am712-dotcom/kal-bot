@@ -1893,14 +1893,18 @@ async def _intelligence_scan_task(
 
 async def _attention_task(engine: "AttentionEngine") -> None:
     """
-    Background task: check for attention signals every 90 minutes between 8am–6pm ET.
-    Also fires the 5pm pattern report check every cycle.
-    Haiku only — target cost under $0.02/day.
+    Background task: runs every 30 min. Engine enforces 90-min internal throttle.
+
+    Each cycle:
+      - run_attention_check()  — posts signals in 8am and 7pm windows
+      - run_foundation_check() — posts 1 FOUNDATION post at 2pm
+      - run_pattern_check()    — posts daily pattern report at 5pm
     """
     while True:
-        await asyncio.sleep(30 * 60)   # check every 30 min; engine enforces 90-min internal throttle
+        await asyncio.sleep(30 * 60)   # check every 30 min
         try:
             await engine.run_attention_check()
+            await engine.run_foundation_check()
             await engine.run_pattern_check()
         except Exception as exc:
             log.warning("attention_task_error", error=str(exc))

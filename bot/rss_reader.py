@@ -57,6 +57,10 @@ RSS_FEEDS: list[tuple[str, str]] = [
     ("AI Newsletter",        "https://buttondown.email/ainews/rss"),
     ("Algorithmic Bridge",   "https://www.thealgorithmicbridge.com/feed"),
     ("AI Snake Oil",         "https://aisnakeoil.substack.com/feed"),
+    # Tech / general (high volume, broad AI + tech coverage)
+    ("TechCrunch",           "https://feeds.feedburner.com/techcrunch"),
+    ("Hacker News",          "https://hnrss.org/frontpage"),
+    ("The Verge",            "https://feeds.feedburner.com/TheVerge"),
 ]
 
 # Sources that automatically pass the keyword filter and receive +3 signal score.
@@ -118,9 +122,10 @@ _rss_call_date:   str      = ""
 
 # ── File paths ────────────────────────────────────────────────────────────────
 
-_BOT_DIR         = Path(__file__).parent
-RSS_CONTEXT_PATH = _BOT_DIR / "rss_context_today.json"
-RSS_CONTEXT_MAX  = 40   # max articles stored in rolling context file
+_BOT_DIR               = Path(__file__).parent
+RSS_CONTEXT_PATH       = _BOT_DIR / "rss_context_today.json"
+RSS_CONTEXT_YESTERDAY  = _BOT_DIR / "rss_context_yesterday.json"
+RSS_CONTEXT_MAX        = 40   # max articles stored in rolling context file
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -153,10 +158,17 @@ def _strip_html(text: str) -> str:
 
 
 def _reset_daily_state() -> None:
-    """Reset per-day tracking at midnight ET."""
+    """Reset per-day tracking at midnight ET. Saves today's context as yesterday before clearing."""
     global _processed_urls, _processed_date, _rss_call_count, _rss_call_date
     today = _today_et()
     if _processed_date != today:
+        # Save today's context as yesterday before the new day starts
+        try:
+            if RSS_CONTEXT_PATH.exists():
+                import shutil
+                shutil.copy2(RSS_CONTEXT_PATH, RSS_CONTEXT_YESTERDAY)
+        except Exception as exc:
+            log.debug("[rss] failed to save yesterday context: %s", exc)
         _processed_urls = set()
         _processed_date = today
         log.debug("[rss] daily URL dedup set reset for %s", today)

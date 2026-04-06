@@ -1438,19 +1438,69 @@ async def notify_pattern_report(
     await _send("patterns", {"content": "\n".join(lines), "username": KAL})
 
 
-async def notify_content_opportunity(
-    signal: str,
-    angle: str,
-    format_suggestion: str,
-    urgency: str,
-) -> None:
-    """Auto-post a content opportunity to #content-queue when attention score >= 8."""
+async def notify_content_opportunity(signal_data: dict) -> None:
+    """
+    Post a fully-formatted SIGNAL DETECTED (or FOUNDATION) brief to #content-queue.
+
+    signal_data keys (from _haiku_attention_signal or _haiku_foundation_post):
+      title, hook, slides (list[str]), caption, image_prompts (dict),
+      format, angle, why_now, final_score, score
+      is_foundation (bool, optional) — if True, renders FOUNDATION header
+    """
+    is_foundation = signal_data.get("is_foundation", False)
+    title         = signal_data.get("title") or signal_data.get("topic", "")
+    hook          = signal_data.get("hook", "")
+    slides        = signal_data.get("slides") or []
+    caption       = signal_data.get("caption", "")
+    image_prompts = signal_data.get("image_prompts") or {}
+    fmt           = signal_data.get("format", "A")
+    angle         = signal_data.get("angle", "perspective_shift")
+    why_now       = signal_data.get("why_now", "practical")
+    score         = signal_data.get("final_score") or signal_data.get("score", 0)
+
+    # Build slides block
+    slide_lines: list[str] = []
+    for i, slide_text in enumerate(slides, start=1):
+        slide_lines.append(f"Slide {i}: {slide_text}" if not slide_text.startswith("Slide") else slide_text)
+    slides_block = "\n".join(slide_lines) if slide_lines else "N/A"
+
+    # Build image prompts block
+    img_slide1   = image_prompts.get("slide_1", "")
+    img_slides   = image_prompts.get("slides_2_6", "")
+    img_block = ""
+    if img_slide1:
+        img_block += f"Slide 1: {img_slide1}"
+    if img_slides:
+        img_block += ("\n" if img_block else "") + f"Slides 2-6: {img_slides}"
+    if not img_block:
+        img_block = "N/A"
+
+    if is_foundation:
+        header = "📚 FOUNDATION"
+        score_line = f"FORMAT: {fmt} | ANGLE: {angle} | WHY NOW: {why_now}"
+    else:
+        header = "📰 SIGNAL DETECTED"
+        score_line = f"FORMAT: {fmt} | ANGLE: {angle} | WHY NOW: {why_now} | SCORE: {score}/10"
+
     lines = [
-        "**Content Opportunity**",
-        f"**Signal:** {signal}",
-        f"**Angle:** {angle}",
-        f"**Format suggestion:** {format_suggestion}",
-        f"**Urgency:** {urgency}",
+        "---",
+        f"**{header}**",
+        "",
+        f"**TITLE:** {title}",
+        "",
+        f"**HOOK:** {hook}",
+        "",
+        "**SLIDES:**",
+        slides_block,
+        "",
+        "**CAPTION:**",
+        caption,
+        "",
+        "**IMAGE PROMPTS:**",
+        img_block,
+        "",
+        score_line,
+        "---",
     ]
     await _send("content-queue", {"content": "\n".join(lines), "username": KAL})
 

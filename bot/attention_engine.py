@@ -45,8 +45,10 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-_BOT_DIR = Path(__file__).parent
-RSS_CONTEXT_PATH = _BOT_DIR / "rss_context_today.json"
+_BOT_DIR               = Path(__file__).parent
+RSS_CONTEXT_PATH       = _BOT_DIR / "rss_context_today.json"
+RSS_CONTEXT_YESTERDAY  = _BOT_DIR / "rss_context_yesterday.json"
+FOUNDATION_GUIDE_PATH  = _BOT_DIR / "resources" / "prompt_engineering_guide.md"
 
 # ── Niche config (swap this to fork for Kal_Finance, Kal_Crypto, etc.) ────────
 
@@ -94,6 +96,7 @@ _attention_posts_today:   int  = 0
 _attention_date:          str  = ""
 _pattern_posted_today:    bool = False
 _pattern_date:            str  = ""
+_foundation_posted_today: bool = False
 _last_attention_check_ts: float = 0.0
 _ATTENTION_MIN_INTERVAL   = 90 * 60   # at least 90 min between attention checks
 
@@ -102,7 +105,26 @@ _slot_a_used: bool = False   # concept / educational
 _slot_b_used: bool = False   # tool / product
 _slot_c_used: bool = False   # news / event
 
-MAX_ATTENTION_PER_DAY = 3
+MAX_ATTENTION_PER_DAY = 3   # across windows 1 + 3
+
+# ── 3-window schedule ─────────────────────────────────────────────────────────
+# Window 1: 8am-12pm  — 2-3 signals
+# Window 2: 2pm-4pm   — 1 FOUNDATION post (handled by run_foundation_check)
+# Window 3: 7pm-10pm  — 1-2 signals
+
+_WINDOWS: list[tuple[int, int, int]] = [
+    (8,  12, 3),   # (start_hour, end_hour, target_posts)
+    (19, 22, 2),   # 7pm-10pm
+]
+
+
+def _current_signal_window() -> tuple[int, int] | None:
+    """Return (target_posts, window_index) if we're in a signal posting window, else None."""
+    hour = _now_et_hour()
+    for i, (start, end, target) in enumerate(_WINDOWS):
+        if start <= hour < end:
+            return target, i
+    return None
 
 
 def _today_et() -> str:
@@ -131,7 +153,7 @@ def _now_et_str() -> str:
 
 def _reset_daily_state() -> None:
     global _attention_posts_today, _attention_date, _pattern_posted_today, _pattern_date
-    global _slot_a_used, _slot_b_used, _slot_c_used
+    global _slot_a_used, _slot_b_used, _slot_c_used, _foundation_posted_today
     today = _today_et()
     if _attention_date != today:
         _attention_posts_today = 0
@@ -139,6 +161,7 @@ def _reset_daily_state() -> None:
         _slot_a_used = False
         _slot_b_used = False
         _slot_c_used = False
+        _foundation_posted_today = False
     if _pattern_date != today:
         _pattern_posted_today = False
         _pattern_date = today
@@ -146,19 +169,74 @@ def _reset_daily_state() -> None:
 
 # ── RSS context loading ───────────────────────────────────────────────────────
 
-def _load_rss_context() -> list[dict]:
-    """Load today's RSS articles from rss_context_today.json. Returns [] on any error."""
+def _load_rss_context(include_yesterday: bool = False) -> list[dict]:
+    """
+    Load today's RSS articles from rss_context_today.json.
+    If include_yesterday=True, also merges yesterday's articles (48h window).
+    Returns [] on any error.
+    """
+    articles: list[dict] = []
     try:
         data = json.loads(RSS_CONTEXT_PATH.read_text(encoding="utf-8"))
         today = _today_et()
         if data.get("date") == today:
-            return data.get("articles", [])
+            articles = data.get("articles", [])
     except Exception:
         pass
-    return []
+
+    if include_yesterday:
+        try:
+            yesterday_data = json.loads(RSS_CONTEXT_YESTERDAY.read_text(encoding="utf-8"))
+            yesterday_articles = yesterday_data.get("articles", [])
+            # Deduplicate by URL before merging
+            existing_urls = {a.get("url", "") for a in articles}
+            for a in yesterday_articles:
+                if a.get("url", "") not in existing_urls:
+                    articles.append(a)
+            log.debug("[attention] 48h widening: merged %d yesterday articles", len(yesterday_articles))
+        except Exception:
+            pass
+
+    return articles
 
 
 # ── Content filter ────────────────────────────────────────────────────────────
+
+import re as _re
+
+# Named entities for hard entity filter (expanded from _ENTITY_MATCH)
+_NAMED_ENTITIES: frozenset[str] = frozenset({
+    # AI labs / models
+    "openai", "anthropic", "google", "meta", "microsoft", "apple",
+    "chatgpt", "claude", "gpt-4", "gpt-5", "gemini", "llama", "mistral",
+    "copilot", "perplexity", "ai agent", "llm",
+    # Video / audio AI
+    "higgsfield", "seedance", "runway", "pika", "kling",
+    "sora", "veo", "invideo", "synthesia", "heygen",
+    "eleven labs", "elevenlabs",
+    # Countries / geopolitical entities
+    "iran", "china", "russia", "ukraine", "us", "usa", "eu", "nato",
+    # Platforms / companies
+    "nvidia", "intel", "amd", "tesla", "amazon", "aws",
+    "samsung", "huawei", "tencent", "alibaba", "baidu",
+})
+
+_NUMBER_PATTERN = _re.compile(r'\$[\d,.]+[BMKbmk]?|\d+[\d,.]*\s*(?:billion|million|%|percent)', _re.IGNORECASE)
+
+
+def _passes_entity_hard_filter(topic: str) -> bool:
+    """
+    Hard filter: topic must contain a named entity (company/country/product)
+    OR a specific number ($30B, 40%, etc.).
+    Returns True if it passes, False if it should be rejected.
+    """
+    t = topic.lower()
+    if any(e in t for e in _NAMED_ENTITIES):
+        return True
+    if _NUMBER_PATTERN.search(topic):
+        return True
+    return False
+
 
 def _passes_ai_filter(topic: str, has_ai_specific: bool, score: int) -> bool:
     """
@@ -240,7 +318,7 @@ def _extract_topics(articles: list[dict]) -> list[dict]:
         source_list    = list(data["sources"])
         has_ai_specific = data.get("ai_specific", False)
         score = _score_topic(topic, len(source_list), has_ai_specific)
-        if score >= 6:
+        if score >= 7:
             results.append({
                 "topic":      topic,
                 "sources":    source_list,
@@ -258,74 +336,83 @@ async def _haiku_attention_signal(
     topic: str, titles: list[str], score: int, api_key: str, model: str
 ) -> dict | None:
     """
-    Call Haiku to generate a structured attention signal.
-    Returns the signal dict or None on failure.
+    Call Haiku to generate a full SIGNAL DETECTED content brief.
 
-    Signal shape:
-      topic    — str
-      format   — "A" | "B" | "C"
-      hook     — str, under 12 words
-      why_now  — "new_release" | "trending" | "practical"
-      angle    — "perspective_shift" | "economic_impact" | "conflict"
-      score    — int
-      niche    — str (NICHE constant)
+    Returns signal dict with: topic, title, hook, slides (list[str]),
+    caption, image_prompts (dict), format, angle, why_now, score, final_score, niche.
+    Returns None if Haiku rejects the signal.
     """
     headlines = "\n".join(f"- {t}" for t in titles[:5])
-    prompt = (
-        f"You are an expert AI content strategist who has grown "
-        f"multiple AI education pages to 1M+ followers.\n\n"
-        f"Your goal: Identify AI news stories with the highest "
-        f"probability of performing as viral Instagram carousel "
-        f"content for a beginner audience aged 18-35.\n\n"
-        f"Process (follow this exactly):\n"
-        f"1. Analyze the story\n"
-        f"2. Break down why it matters in simple terms\n"
-        f"3. Score it based on:\n"
-        f"   - novelty: is this new or already known? (1-10)\n"
-        f"   - clarity: can a beginner understand it? (1-10)\n"
-        f"   - emotional pull: curiosity, fear, or excitement? (1-10)\n"
-        f"   - shareability: would someone send this to a friend? (1-10)\n"
-        f"4. Generate 3 different hook angles (under 12 words each)\n"
-        f"5. Score each hook on the same criteria\n"
-        f"6. Select the best hook and explain why\n\n"
-        f"Topic: {topic}\n"
-        f"Signal score: {score}/10\n"
-        f"Headlines:\n{headlines}\n\n"
-        f"Today: {_now_et_str()}\n\n"
-        f"Output as JSON (or return null if rejection criteria are met):\n"
-        f"{{\n"
-        f'  "topic": "{topic[:80]}",\n'
-        f'  "format": "A" | "B" | "C",\n'
-        f'  "final_score": <number 1-10>,\n'
-        f'  "hook": "<winning hook, under 12 words>",\n'
-        f'  "hook_reason": "<one sentence — why this hook wins>",\n'
-        f'  "why_now": "new_release" | "trending" | "practical",\n'
-        f'  "angle": "perspective_shift" | "economic_impact" | "conflict",\n'
-        f'  "niche": "AI"\n'
-        f"}}\n\n"
-        f"Format rules:\n"
-        f"  A = concept / educational (explaining what something is or how it works)\n"
-        f"  B = tool / product (specific software, model, or product release)\n"
-        f"  C = news / event (regulatory update, business news, trending story)\n\n"
-        f"why_now rules:\n"
-        f"  new_release  = product/model/paper just dropped\n"
-        f"  trending     = gaining attention across multiple sources today\n"
-        f"  practical    = has immediate real-world use or implication\n\n"
-        f"angle rules:\n"
-        f"  perspective_shift = topic challenges a common belief or assumption\n"
-        f'    e.g. "AI isn\'t magic — it\'s just algorithms + data"\n'
-        f"  economic_impact   = topic involves cost, jobs, money, or industry disruption\n"
-        f'    e.g. "What studios spend $200M on now costs $0"\n'
-        f"  conflict          = topic involves displacement, competition, or a battle between forces\n"
-        f'    e.g. "The real battle isn\'t human vs AI — it\'s adaptation"\n\n'
-        f"REJECT (return null) if:\n"
-        f"- final_score below 6\n"
-        f"- hook is generic or over 12 words\n"
-        f"- why_now cannot be clearly classified\n"
-        f"- topic requires prior technical knowledge to understand"
-    )
+
+    prompt = f"""You are an expert AI content strategist who has grown multiple AI education pages to 1M+ followers.
+
+ROLE: Instagram carousel content creator for @artificialeducation. Audience: beginners aged 18-35. No jargon. Punchy, emotional, direct.
+
+TOPIC: {topic}
+SIGNAL SCORE: {score}/10
+HEADLINES:
+{headlines}
+TODAY: {_now_et_str()}
+
+PROCESS:
+1. Analyze this story — what is the specific event, entity, number, or conflict?
+2. Score: novelty (1-10) + clarity (1-10) + emotional pull (1-10) + shareability (1-10)
+3. Generate 3 hooks (≤12 words each), score each, pick the winner
+4. Write the full carousel brief
+
+REJECTION CRITERIA — return null immediately if ANY are true:
+- No specific company, country, product, or number in the topic
+- final_score below 7
+- Best hook is generic ("here's how", "things to know", "you need to know") or >12 words
+- Topic requires technical background knowledge to understand
+- Story is not time-relevant or emotionally triggering
+
+ACCEPTED EXAMPLES:
+- "Iran threatens OpenAI $30B Stargate data center"
+- "Higgsfield drops Seedance 2.0 with real-time video generation"
+- "Google Gemini 2.5 beats GPT-4o on every benchmark"
+
+REJECTED EXAMPLES:
+- "The One Thing I Use AI For Every Day"
+- "AI as Normal Technology"
+- "Why Prompt Engineering Matters"
+
+OUTPUT (return null if rejected, otherwise this exact JSON):
+{{
+  "title": "<specific topic with real entity/event — not generic>",
+  "hook": "<winning hook, ≤12 words, must contain company name OR country OR number OR specific event>",
+  "hook_reason": "<one sentence — why this hook wins over the other two>",
+  "slides": [
+    "Slide 1: <real media instruction — grab screenshot of X, use clip from Y, show the actual announcement>",
+    "Slide 2: <specific point about what happened>",
+    "Slide 3: <specific point about why it matters>",
+    "Slide 4: <specific point about the implication or who is affected>",
+    "Slide 5: <payoff — what this means for the viewer, what changes now>",
+    "Slide 6: Follow @artificialeducation — <punchy CTA related to topic>"
+  ],
+  "caption": "<full ready-to-paste caption — mobile format, short lines, no educational tone, punchy, 150-300 words, ends with question or CTA>",
+  "image_prompts": {{
+    "slide_1": "real media — <specific instruction: screenshot of [X], clip from [Y], or photo of [event]>",
+    "slides_2_6": "Kodachrome film still, <subject related to slide content>, <mood>, cinematic hyperrealistic, motion blur, anti aliasing, lens distortion, color accent lighting, 2020s, no text, no watermark, vertical format, gorgeous, highly detailed"
+  }},
+  "format": "A" | "B" | "C",
+  "angle": "perspective_shift" | "economic_impact" | "conflict",
+  "why_now": "new_release" | "trending" | "practical",
+  "final_score": <integer 7-10>
+}}
+
+FORMAT RULES:
+  A = concept/educational (explaining what something is or how it works)
+  B = tool/product release (specific software, model, product drop)
+  C = news/event (regulatory, business news, geopolitical, trending story)
+
+ANGLE RULES:
+  perspective_shift — challenges a common belief ("AI isn't going to take your job. AI users are.")
+  economic_impact   — involves cost, jobs, money, or industry disruption ("What studios spend $200M on now costs $0")
+  conflict          — displacement, competition, or battle between forces ("The real war isn't human vs AI")"""
+
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -335,7 +422,7 @@ async def _haiku_attention_signal(
                 },
                 json={
                     "model":      model,
-                    "max_tokens": 500,
+                    "max_tokens": 1800,
                     "messages":   [{"role": "user", "content": prompt}],
                 },
             )
@@ -347,7 +434,6 @@ async def _haiku_attention_signal(
                 text = text[4:]
         text = text.strip()
 
-        # Haiku rejected the signal
         if text.lower() == "null":
             log.info("[attention] haiku_rejected topic=%s", topic[:60])
             return None
@@ -367,22 +453,35 @@ async def _haiku_attention_signal(
         if angle not in ("perspective_shift", "economic_impact", "conflict"):
             angle = "perspective_shift"
         final_score = int(data.get("final_score", score))
-        if final_score < 6:
+        if final_score < 7:
             log.info("[attention] haiku_score_too_low final_score=%d topic=%s", final_score, topic[:60])
             return None
+
         # Enforce hook length (truncate to 12 words)
-        hook_words = data.get("hook", topic[:60]).split()
+        hook_words = (data.get("hook") or topic[:60]).split()
         hook = " ".join(hook_words[:12])
+
+        # Ensure slides is a list with exactly 6 entries
+        slides = data.get("slides") or []
+        if not isinstance(slides, list):
+            slides = []
+        while len(slides) < 6:
+            slides.append("")
+
         return {
-            "topic":       topic,
-            "format":      fmt,
-            "hook":        hook,
-            "hook_reason": data.get("hook_reason", ""),
-            "why_now":     why_now,
-            "angle":       angle,
-            "score":       score,        # original topic score (pre-Haiku)
-            "final_score": final_score,  # Haiku's evaluated score
-            "niche":       NICHE,
+            "topic":         topic,
+            "title":         data.get("title", topic[:80]),
+            "format":        fmt,
+            "hook":          hook,
+            "hook_reason":   data.get("hook_reason", ""),
+            "slides":        slides[:6],
+            "caption":       data.get("caption", ""),
+            "image_prompts": data.get("image_prompts", {}),
+            "why_now":       why_now,
+            "angle":         angle,
+            "score":         score,
+            "final_score":   final_score,
+            "niche":         NICHE,
         }
     except Exception as exc:
         log.warning("[attention] haiku_call_failed: %s", exc)
@@ -433,6 +532,112 @@ async def _haiku_pattern_report(
         return json.loads(text)
     except Exception as exc:
         log.warning("[attention] haiku_pattern_failed: %s", exc)
+        return None
+
+
+async def _haiku_foundation_post(api_key: str, model: str) -> dict | None:
+    """
+    Generate a FOUNDATION post from prompt_engineering_guide.md.
+    Evergreen, opinionated, not news-dependent. Always format A.
+    Posts once per day at 2pm ET.
+
+    Returns dict: {title, hook, slides, caption, image_prompts, format, angle, why_now}
+    """
+    try:
+        guide_text = FOUNDATION_GUIDE_PATH.read_text(encoding="utf-8")[:3000]
+    except Exception as exc:
+        log.warning("[attention] foundation_guide_read_failed: %s", exc)
+        return None
+
+    prompt = f"""You are an expert AI content strategist for @artificialeducation on Instagram. Audience: beginners aged 18-35.
+
+TASK: Create one evergreen, high-performing Instagram carousel about prompt engineering or AI usage.
+
+SOURCE MATERIAL:
+{guide_text}
+
+RULES:
+- Pick ONE specific, opinionated angle — not "what is prompt engineering"
+- Must be immediately actionable or challenge a common belief
+- No news dependency — this must be relevant any day of the year
+
+GOOD TOPICS:
+- "Stop prompting like this (most people do it wrong)"
+- "3 prompts that replace 4 hours of work"
+- "The prompt structure that works 90% of the time"
+- "Why your AI answers are bad (it's not the AI)"
+
+BAD TOPICS (reject these angles):
+- "What is prompt engineering?"
+- "Benefits of using AI"
+- "Introduction to ChatGPT"
+
+OUTPUT (this exact JSON, no preamble):
+{{
+  "title": "<specific, opinionated title>",
+  "hook": "<hook ≤12 words — punchy, specific, must create curiosity or mild tension>",
+  "slides": [
+    "Slide 1: <title card text — short, punchy, the hook>",
+    "Slide 2: <the problem most people have (relatable)>",
+    "Slide 3: <the fix — specific, actionable>",
+    "Slide 4: <example — before/after or real prompt shown>",
+    "Slide 5: <why this works — the principle behind it>",
+    "Slide 6: Follow @artificialeducation — <CTA: save this, share with a friend who uses AI>"
+  ],
+  "caption": "<full ready-to-paste caption — mobile format, short lines, punchy, no fluff, 100-200 words>",
+  "image_prompts": {{
+    "slide_1": "Kodachrome film still, person confidently typing at laptop late at night, warm glow, cinematic hyperrealistic, motion blur, anti aliasing, lens distortion, color accent lighting, 2020s, no text, no watermark, vertical format, gorgeous, highly detailed",
+    "slides_2_6": "Kodachrome film still, <subject matching each slide's theme>, thoughtful mood, cinematic hyperrealistic, motion blur, anti aliasing, lens distortion, color accent lighting, 2020s, no text, no watermark, vertical format, gorgeous, highly detailed"
+  }},
+  "format": "A",
+  "angle": "perspective_shift",
+  "why_now": "practical"
+}}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key":         api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type":      "application/json",
+                },
+                json={
+                    "model":      model,
+                    "max_tokens": 1600,
+                    "messages":   [{"role": "user", "content": prompt}],
+                },
+            )
+        resp.raise_for_status()
+        text = resp.json()["content"][0]["text"].strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+        data = json.loads(text)
+        if not data:
+            return None
+        slides = data.get("slides") or []
+        if not isinstance(slides, list):
+            slides = []
+        while len(slides) < 6:
+            slides.append("")
+        return {
+            "title":         data.get("title", ""),
+            "hook":          " ".join((data.get("hook") or "").split()[:12]),
+            "slides":        slides[:6],
+            "caption":       data.get("caption", ""),
+            "image_prompts": data.get("image_prompts", {}),
+            "format":        "A",
+            "angle":         "perspective_shift",
+            "why_now":       "practical",
+            "final_score":   8,
+            "niche":         NICHE,
+        }
+    except Exception as exc:
+        log.warning("[attention] haiku_foundation_failed: %s", exc)
         return None
 
 
@@ -515,24 +720,28 @@ class AttentionEngine:
 
     async def run_attention_check(self) -> None:
         """
-        Check for new attention signals. Call this every ~90 minutes during 8am–6pm ET.
-        Posts 0–1 signals per check; respects daily max of 3 (1 per format slot A/B/C).
+        Check for new attention signals. Runs every 30 min; internal throttle = 90 min.
+
+        Schedule:
+          Window 1 — 8am-12pm ET  (target 2-3 signals)
+          Window 3 — 7pm-10pm ET  (target 1-2 signals)
+          Foundation at 2pm is handled separately by run_foundation_check().
 
         Pipeline (enforced in order):
-          1. Load articles from rss_context_today.json
-          2. Score topics (ai_specific = +2 boost, cross-source frequency)
-          3. Entity + action filter (_passes_ai_filter)
-          4. Deduplicate near-duplicate clusters
-          5. Iterate candidates: call Haiku → postability validation → slot check → post
+          1. Check we're in a signal window, daily cap not reached, interval elapsed
+          2. Load articles (48h widening if today < 3 posts)
+          3. Score → entity+action filter → entity hard filter → dedup
+          4. Iterate candidates: Haiku → postability validation → slot check → post
         """
         global _attention_posts_today, _attention_date, _last_attention_check_ts
         global _slot_a_used, _slot_b_used, _slot_c_used
 
         _reset_daily_state()
 
-        hour = _now_et_hour()
-        if hour < 8 or hour >= 18:
-            log.debug("[attention] outside attention window (8am-6pm ET) — skipping")
+        # ── Window check ──────────────────────────────────────────────────────
+        window = _current_signal_window()
+        if window is None:
+            log.debug("[attention] outside signal windows — skipping")
             return
 
         if _attention_posts_today >= MAX_ATTENTION_PER_DAY:
@@ -545,25 +754,27 @@ class AttentionEngine:
             return
         _last_attention_check_ts = now
 
-        # ── Step 1: load articles ─────────────────────────────────────────────
-        articles = _load_rss_context()
+        # ── Step 1: load articles (widen to 48h if we're short on signals) ────
+        include_yesterday = (_attention_posts_today < 3)
+        articles = _load_rss_context(include_yesterday=include_yesterday)
         if not articles:
             log.debug("[attention] no RSS context available")
             return
 
-        # ── Steps 2+3: score then apply entity+action content filter ──────────
-        topics = _extract_topics(articles)   # scoring happens here (incl. +2 boost)
+        # ── Steps 2+3: score → AI filter → entity hard filter ─────────────────
+        topics = _extract_topics(articles)
         if not topics:
             log.debug("[attention] no scoreable topics found")
             return
 
         filtered = [
             t for t in topics
-            if t["score"] >= 6
+            if t["score"] >= 7
             and _passes_ai_filter(t["topic"], t.get("ai_specific", False), t["score"])
+            and _passes_entity_hard_filter(t["topic"])
         ]
         if not filtered:
-            log.debug("[attention] no topics passed AI content filter")
+            log.debug("[attention] no topics passed content filters (score≥7 + entity)")
             return
 
         # ── Step 4: deduplicate near-duplicate clusters ───────────────────────
@@ -578,58 +789,41 @@ class AttentionEngine:
             titles  = top["titles"]
             sources = top["sources"]
 
-            # Call Haiku to classify and polish the signal
+            # Call Haiku to generate the full SIGNAL DETECTED brief
             signal = await _haiku_attention_signal(topic, titles, score, self._api_key, self._model)
 
-            # Determine format; fall back to "C" only if Haiku failed entirely
-            fmt = signal["format"] if signal else "C"
+            if signal is None:
+                # Haiku rejected — try next candidate
+                continue
+
+            fmt = signal["format"]
 
             # Postability validation gate
-            if signal:
-                ok, reason = validate_signal(signal)
-                if not ok:
-                    log.info(
-                        "[attention] signal_rejected reason=%s topic=%s",
-                        reason, topic[:60],
-                    )
-                    continue
+            ok, reason = validate_signal(signal)
+            if not ok:
+                log.info("[attention] signal_rejected reason=%s topic=%s", reason, topic[:60])
+                continue
 
             # Skip if this format slot is already filled today
             if fmt == "A" and _slot_a_used:
-                log.debug("[attention] format A slot already used today — trying next")
+                log.debug("[attention] format A slot full — trying next")
                 continue
             if fmt == "B" and _slot_b_used:
-                log.debug("[attention] format B slot already used today — trying next")
+                log.debug("[attention] format B slot full — trying next")
                 continue
             if fmt == "C" and _slot_c_used:
-                log.debug("[attention] format C slot already used today — trying next")
+                log.debug("[attention] format C slot full — trying next")
                 continue
 
-            # ── Post the signal ───────────────────────────────────────────────
-            if signal:
-                await discord.notify_attention_signal(
-                    topic=topic,
-                    why_matters=signal.get("why_matters", ""),
-                    why_now=signal.get("why_now", "trending"),
-                    score=score,
-                    sources=sources,
-                )
-                if score >= 8:
-                    await discord.notify_content_opportunity(
-                        signal=topic,
-                        angle=signal.get("angle", ""),
-                        format_suggestion=fmt,
-                        urgency="post today" if score >= 9 else "this week",
-                    )
-            else:
-                # Haiku failed — post basic signal without AI polish
-                await discord.notify_attention_signal(
-                    topic=topic,
-                    why_matters="Multiple AI sources covering this topic today.",
-                    why_now="trending",
-                    score=score,
-                    sources=sources,
-                )
+            # ── Post to #attention and #content-queue ─────────────────────────
+            await discord.notify_attention_signal(
+                topic=topic,
+                why_matters=signal.get("hook", ""),
+                why_now=signal.get("why_now", "trending"),
+                score=score,
+                sources=sources,
+            )
+            await discord.notify_content_opportunity(signal)
 
             # Mark format slot as used
             if fmt == "A":
@@ -641,11 +835,39 @@ class AttentionEngine:
 
             _attention_posts_today += 1
             log.info(
-                "[attention] signal posted score=%d format=%s why_now=%s topic=%s",
-                score, fmt, signal.get("why_now", "?") if signal else "?", topic[:60],
+                "[attention] signal_posted score=%d format=%s why_now=%s final_score=%d topic=%s",
+                score, fmt, signal["why_now"], signal["final_score"], topic[:60],
             )
             # One signal per check run
             break
+
+    async def run_foundation_check(self) -> None:
+        """
+        Post one FOUNDATION post to #content-queue at 2pm ET. Once per day.
+        Evergreen prompt-engineering content from prompt_engineering_guide.md.
+        """
+        global _foundation_posted_today
+
+        _reset_daily_state()
+
+        if _foundation_posted_today:
+            return
+
+        hour = _now_et_hour()
+        if hour < 14 or hour >= 16:
+            return
+
+        import discord_notifier as discord
+
+        signal = await _haiku_foundation_post(self._api_key, self._model)
+        if signal:
+            # Add FOUNDATION marker so notifier formats it distinctly
+            signal["is_foundation"] = True
+            await discord.notify_content_opportunity(signal)
+            _foundation_posted_today = True
+            log.info("[attention] foundation_post sent hook=%s", signal.get("hook", "")[:60])
+        else:
+            log.warning("[attention] foundation_post generation failed")
 
     async def run_pattern_check(self) -> None:
         """
@@ -685,9 +907,14 @@ class AttentionEngine:
                 top_topic = topics[0]["topic"].lower()
                 pattern_text = result.get("pattern", "").lower()
                 if any(w in pattern_text for w in top_topic.split()[:3] if len(w) > 4):
-                    await discord.notify_content_opportunity(
-                        signal=result.get("pattern", ""),
-                        angle="Pattern-backed content — this narrative has multi-source support today.",
-                        format_suggestion="thread",
-                        urgency="post today",
-                    )
+                    await discord.notify_content_opportunity({
+                        "title":   result.get("pattern", ""),
+                        "hook":    result.get("pattern", "")[:80],
+                        "slides":  [],
+                        "caption": result.get("implication", ""),
+                        "image_prompts": {},
+                        "format":  "C",
+                        "angle":   "perspective_shift",
+                        "why_now": "trending",
+                        "final_score": 8,
+                    })
