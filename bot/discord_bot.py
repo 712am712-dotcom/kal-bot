@@ -28,12 +28,27 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://discord.com/api/v10"
 
-# 4-category structure — each tuple is (category_name, [channel_names_in_order])
+# 6-section structure — each tuple is (category_name, [channel_names_in_order])
 CATEGORIES = [
-    ("📡 DAILY INTELLIGENCE", ["morning-brief", "attention", "breaking", "patterns"]),
-    ("🎬 CONTENT ENGINE",     ["content-queue", "content-output", "content-review"]),
-    ("📊 FEEDBACK LOOP",      ["performance", "wins", "misses"]),
-    ("⚙️ SYSTEM",             ["alerts", "system-logs"]),
+    ("📡 KAL HQ", [
+        "morning-brief", "the-trade-today", "market-pulse", "breaking",
+        "intelligence-feed", "ae-attention", "alerts", "system-logs",
+    ]),
+    ("💹 MARKETS FOR DUMMIES", [
+        "mfd-the-trade-today", "mfd-morning-brief", "mfd-content-queue", "mfd-published",
+    ]),
+    ("🤖 ARTIFICIAL EDUCATION", [
+        "ae-content-queue", "ae-newsletter-queue", "ae-published",
+    ]),
+    ("🏗️ BRAND PIPELINE", [
+        "brand-ideas",
+    ]),
+    ("⚙️ TRADING OPS", [
+        "trades", "thesis", "patterns", "crypto", "economic-calendar",
+    ]),
+    ("📦 ARCHIVE", [
+        "market-open", "market-close", "summary",
+    ]),
 ]
 # No private channels in the new structure
 PRIVATE_CHANNELS: set[str] = set()

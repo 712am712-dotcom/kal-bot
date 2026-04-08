@@ -4,18 +4,22 @@ discord_notifier.py — Discord notifications for Kal.
 Kal — Causal Intelligence Engine
 Tagline: Attention → Insight → Content → Feedback → Intelligence
 
-11 channels across 4 categories:
-  📡 DAILY INTELLIGENCE  morning-brief, attention, breaking, patterns
-  🎬 CONTENT ENGINE      content-queue, content-output, content-review
-  📊 FEEDBACK LOOP       performance, wins, misses
-  ⚙️ SYSTEM              alerts, system-logs
+6 sections across the new server layout:
+  📡 KAL HQ              morning-brief, the-trade-today, market-pulse, breaking,
+                          intelligence-feed, ae-attention, alerts, system-logs
+  💹 MARKETS FOR DUMMIES  mfd-the-trade-today, mfd-morning-brief, mfd-content-queue, mfd-published
+  🤖 ARTIFICIAL EDUCATION ae-content-queue, ae-newsletter-queue, ae-published
+  🏗️ BRAND PIPELINE       brand-ideas
+  ⚙️ TRADING OPS          trades, thesis, patterns, crypto, economic-calendar
+  📦 ARCHIVE              market-open, market-close, summary
 
-Legacy channel alias map (old names automatically routed to new channels):
-  breaking-news     → breaking
-  market-pulse      → attention
+Channel alias map (old names automatically routed to new channels):
+  breaking-news     → breaking          (merged)
+  attention         → ae-attention      (renamed)
+  content-queue     → ae-content-queue  (renamed)
+  ideas             → ae-content-queue  (legacy)
   thesis            → patterns
   economic-calendar → morning-brief
-  ideas             → content-queue
   summary           → system-logs
   trades            → system-logs
   trade-history     → system-logs
@@ -49,11 +53,12 @@ KAL = "Kal"
 # Old channel names are silently remapped to the new structure.
 # All existing _send() calls keep working without modification.
 _CHANNEL_ALIAS: dict[str, str] = {
-    "breaking-news":     "breaking",
-    "market-pulse":      "attention",
+    "breaking-news":     "breaking",            # merged → #breaking
+    "attention":         "ae-attention",         # renamed
+    "content-queue":     "ae-content-queue",     # renamed
+    "ideas":             "ae-content-queue",     # legacy alias
     "thesis":            "patterns",
     "economic-calendar": "morning-brief",
-    "ideas":             "content-queue",
     "summary":           "system-logs",
     "trades":            "system-logs",
     "trade-history":     "system-logs",
@@ -107,9 +112,11 @@ def _now_utc_iso() -> str:
 def _get_webhook(channel: str) -> str | None:
     """
     Return the webhook URL for a channel, falling back to the legacy url.
-    channel: any channel key, e.g. "trades" | "crypto" | "intelligence-feed" | "alerts"
+    channel: any channel key, e.g. "the-trade-today" | "ae-attention" | "alerts"
+    Hyphens are normalised to underscores to match pydantic settings attribute names.
     """
-    specific = getattr(settings, f"discord_webhook_{channel}", "")
+    attr = f"discord_webhook_{channel.replace('-', '_')}"
+    specific = getattr(settings, attr, "")
     if specific:
         return specific
     # Fall back to the legacy single webhook
@@ -1084,14 +1091,16 @@ async def notify_morning_brief(brief: str) -> None:
 
 
 async def notify_todays_focus(focus: str) -> None:
-    """Cross-post The Trade Today section from the brief to #market-pulse."""
+    """Post The Trade Today section to #the-trade-today (KAL HQ) and #mfd-the-trade-today (MFD).
+
+    Two independent webhook posts — keeps KAL HQ and MARKETS FOR DUMMIES sections
+    self-contained so neither depends on the other.
+    """
     if not focus:
         return
-    await _send("market-pulse", _embed(
-        focus,
-        COLOR_GOLD,
-        footer=f"morning brief · {_now_et()}",
-    ))
+    payload = _embed(focus, COLOR_GOLD, footer=f"morning brief · {_now_et()}")
+    await _send("the-trade-today", payload)
+    await _send("mfd-the-trade-today", payload)
 
 
 # ── Channel guides ────────────────────────────────────────────────────────────
@@ -1111,13 +1120,13 @@ _GUIDE_MORNING_BRIEF = (
 )
 
 _GUIDE_ATTENTION = (
-    "**Kal — #attention**\n"
+    "**Kal — #ae-attention**\n"
     "The 3-5 highest-signal topics of the day. What people are paying attention to right now.\n\n"
     "**What you'll see:** Attention signals scored 1–10 based on cross-source frequency and keyword weight. "
     "Only signals scoring 6+ are posted. Each signal includes: topic, why it matters, "
     "what triggered it today, and which sources flagged it.\n\n"
     "Posted 3–5 times per day between 8am–6pm ET. Max 5 posts per day.\n\n"
-    "High-score signals (8+) are auto-queued to #content-queue."
+    "High-score signals (8+) are auto-queued to #ae-content-queue."
 )
 
 _GUIDE_BREAKING = (
@@ -1139,18 +1148,18 @@ _GUIDE_PATTERNS = (
 # ── 🎬 CONTENT ENGINE ─────────────────────────────────────────────────────────
 
 _GUIDE_CONTENT_QUEUE = (
-    "**Kal — #content-queue**\n"
-    "Signals selected for content creation. Auto-populated when attention score ≥ 8 "
-    "or when a topic appears in both #attention and #patterns.\n\n"
+    "**Kal — #ae-content-queue**\n"
+    "Signals selected for Artificial Education content creation. Auto-populated when attention score ≥ 8 "
+    "or when a topic appears in both #ae-attention and #patterns.\n\n"
     "**What you'll see:** Content opportunity with suggested angle, format, and urgency.\n\n"
     "This is where Kal hands off to the content team. Review here, create in Storyforge."
 )
 
 _GUIDE_CONTENT_OUTPUT = (
-    "**Kal — #content-output**\n"
+    "**Kal — #ae-published**\n"
     "Final content briefs and captions ready for review.\n\n"
     "**What you'll see:** Finished content briefs — hook, body, CTA — ready to approve or tweak.\n\n"
-    "Nothing posts here until it passes through #content-queue first."
+    "Nothing posts here until it passes through #ae-content-queue first."
 )
 
 _GUIDE_CONTENT_REVIEW = (
@@ -1191,6 +1200,74 @@ _GUIDE_ALERTS = (
     "**Cost Warning** — Approaching daily spending limit.\n"
     "**Error** — Something went wrong technically. Kal is still running.\n\n"
     "Should be quiet most of the time. Noise here = something needs attention."
+)
+
+_GUIDE_THE_TRADE_TODAY = (
+    "**Kal — #the-trade-today**\n"
+    "One idea. Every morning. The single highest-conviction observation from today's newsletters.\n\n"
+    "**What you'll see:** The specific asset, direction, and thesis — distilled from 20+ financial sources "
+    "into one clear, actionable paragraph.\n\n"
+    "Posted once per morning alongside the full brief in #morning-brief."
+)
+
+_GUIDE_INTELLIGENCE_FEED = (
+    "**Kal — #intelligence-feed**\n"
+    "Live market signals, price shifts, and volume spikes as they happen.\n\n"
+    "**What you'll see:** Real-time 15-minute market updates from the crypto intelligence scanner. "
+    "Price moves > 10%, volume 2× spikes, new windows opening with meaningful volume already in.\n\n"
+    "Only fires when there's a genuine signal. Not a stream — a filter."
+)
+
+_GUIDE_MFD_THE_TRADE_TODAY = (
+    "**Kal — #mfd-the-trade-today**\n"
+    "The Trade Today — Markets For Dummies edition.\n\n"
+    "Same signal as #the-trade-today, delivered here so the MFD audience gets it independently.\n\n"
+    "One post per morning. Plain English. One direction. One thesis."
+)
+
+_GUIDE_MFD_MORNING_BRIEF = (
+    "**Kal — #mfd-morning-brief**\n"
+    "The morning brief adapted for the Markets For Dummies audience.\n\n"
+    "**What you'll see:** Simplified macro overview · The move that matters today · "
+    "What beginners should be watching.\n\n"
+    "Posted each weekday morning."
+)
+
+_GUIDE_MFD_CONTENT_QUEUE = (
+    "**Kal — #mfd-content-queue**\n"
+    "Content opportunities queued for the Markets For Dummies brand.\n\n"
+    "**What you'll see:** Topic briefs with suggested angle and format, "
+    "targeting a beginner-to-intermediate finance audience.\n\n"
+    "Populated when signals are relevant and accessible for MFD's voice."
+)
+
+_GUIDE_MFD_PUBLISHED = (
+    "**Kal — #mfd-published**\n"
+    "Published MFD content log.\n\n"
+    "**What you'll see:** Links and summaries of content published under the Markets For Dummies brand.\n\n"
+    "Updated after each publish. Use this to track what's live."
+)
+
+_GUIDE_AE_NEWSLETTER_QUEUE = (
+    "**Kal — #ae-newsletter-queue**\n"
+    "Newsletter drafts and ideas queued for the Artificial Education brand.\n\n"
+    "**What you'll see:** AI/content newsletter briefs — topic, angle, hook, and send date.\n\n"
+    "Populated when an attention signal is strong enough to anchor a full newsletter."
+)
+
+_GUIDE_AE_PUBLISHED = (
+    "**Kal — #ae-published**\n"
+    "Published Artificial Education content log.\n\n"
+    "**What you'll see:** Links and summaries of AE content published across platforms.\n\n"
+    "Updated after each publish. The record of what's live."
+)
+
+_GUIDE_BRAND_IDEAS = (
+    "**Kal — #brand-ideas**\n"
+    "Raw brand concepts, series ideas, and creative directions.\n\n"
+    "**What you'll see:** Unfiltered ideas for new content series, brand angles, and positioning moves. "
+    "Not all of these will get made — that's fine. This is the ideation layer.\n\n"
+    "Drop anything here. Volume is the point."
 )
 
 _GUIDE_SYSTEM_LOGS = (
@@ -1542,7 +1619,7 @@ async def send_channel_guide() -> None:
 
     When DISCORD_BOT_TOKEN is set:
       1. Update bot profile to username "Kal" with the green logo avatar
-      2. Find or create all 4 categories and 11 sub-channels
+      2. Find or create all 6 categories and sub-channels
       3. Post guide cards to any channel that doesn't have one yet (idempotent)
       4. Pin each guide card (best-effort)
       5. Cache channel IDs so all future _send() calls go through the bot
@@ -1554,24 +1631,31 @@ async def send_channel_guide() -> None:
 
     token = getattr(settings, "discord_bot_token", "")
 
-    # Full guide map — all 11 channels (new structure)
+    # Full guide map — new 6-section structure
     guides = {
-        # 📡 DAILY INTELLIGENCE
-        "morning-brief":   _GUIDE_MORNING_BRIEF,
-        "attention":       _GUIDE_ATTENTION,
-        "breaking":        _GUIDE_BREAKING,
-        "patterns":        _GUIDE_PATTERNS,
-        # 🎬 CONTENT ENGINE
-        "content-queue":   _GUIDE_CONTENT_QUEUE,
-        "content-output":  _GUIDE_CONTENT_OUTPUT,
-        "content-review":  _GUIDE_CONTENT_REVIEW,
-        # 📊 FEEDBACK LOOP
-        "performance":     _GUIDE_PERFORMANCE,
-        "wins":            _GUIDE_WINS,
-        "misses":          _GUIDE_MISSES,
-        # ⚙️ SYSTEM
-        "alerts":          _GUIDE_ALERTS,
-        "system-logs":     _GUIDE_SYSTEM_LOGS,
+        # 📡 KAL HQ
+        "morning-brief":        _GUIDE_MORNING_BRIEF,
+        "the-trade-today":      _GUIDE_THE_TRADE_TODAY,
+        "market-pulse":         _GUIDE_MORNING_BRIEF,   # placeholder — market-pulse has no dedicated guide
+        "breaking":             _GUIDE_BREAKING,
+        "intelligence-feed":    _GUIDE_INTELLIGENCE_FEED,
+        "ae-attention":         _GUIDE_ATTENTION,
+        "alerts":               _GUIDE_ALERTS,
+        "system-logs":          _GUIDE_SYSTEM_LOGS,
+        # 💹 MARKETS FOR DUMMIES
+        "mfd-the-trade-today":  _GUIDE_MFD_THE_TRADE_TODAY,
+        "mfd-morning-brief":    _GUIDE_MFD_MORNING_BRIEF,
+        "mfd-content-queue":    _GUIDE_MFD_CONTENT_QUEUE,
+        "mfd-published":        _GUIDE_MFD_PUBLISHED,
+        # 🤖 ARTIFICIAL EDUCATION
+        "ae-content-queue":     _GUIDE_CONTENT_QUEUE,
+        "ae-newsletter-queue":  _GUIDE_AE_NEWSLETTER_QUEUE,
+        "ae-published":         _GUIDE_AE_PUBLISHED,
+        # 🏗️ BRAND PIPELINE
+        "brand-ideas":          _GUIDE_BRAND_IDEAS,
+        # ⚙️ TRADING OPS
+        "patterns":             _GUIDE_PATTERNS,
+        # 📦 ARCHIVE — no guides needed
     }
 
     if token:

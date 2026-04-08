@@ -51,14 +51,28 @@ class Settings(BaseSettings):
     # ── Risk — live mode has a stricter volume floor ──────────────────────────
     live_min_liquidity_dollars: float = Field(default=200.0, description="Live mode min volume — skip markets below this")
 
-    # ── Discord — 4 separate channels ────────────────────────────────────────
-    discord_webhook_url: str = Field(default="", description="Fallback webhook (legacy — use channel-specific ones below)")
-    discord_webhook_trades:   str = Field(default="", description="Trades channel: placed + resolved")
-    discord_webhook_analysis: str = Field(default="", description="Analysis channel: AI decisions")
-    discord_webhook_summary:  str = Field(default="", description="Summary channel: periodic + daily reports")
-    discord_webhook_alerts:        str = Field(default="", description="Alerts channel: errors + critical issues")
-    discord_webhook_intelligence:  str = Field(default="", description="Intelligence channel: market alerts, hourly snapshot")
-    discord_bot_token:             str = Field(default="", description="Bot token — required for channel creation, pinning, profile updates")
+    # ── Discord — channel webhooks ─────────────────────────────────────────────
+    discord_webhook_url: str = Field(default="", description="Fallback webhook (legacy — used if channel-specific one is absent)")
+    # Legacy channel webhooks (kept for backward compat)
+    discord_webhook_trades:       str = Field(default="", description="Trades channel")
+    discord_webhook_analysis:     str = Field(default="", description="Analysis channel")
+    discord_webhook_summary:      str = Field(default="", description="Summary channel")
+    discord_webhook_alerts:       str = Field(default="", description="Alerts channel")
+    discord_webhook_intelligence: str = Field(default="", description="Intelligence channel")
+    # 📡 KAL HQ
+    discord_webhook_the_trade_today:  str = Field(default="", description="#the-trade-today webhook")
+    # 💹 MARKETS FOR DUMMIES
+    discord_webhook_mfd_the_trade_today: str = Field(default="", description="#mfd-the-trade-today webhook")
+    discord_webhook_mfd_morning_brief:   str = Field(default="", description="#mfd-morning-brief webhook")
+    discord_webhook_mfd_content_queue:   str = Field(default="", description="#mfd-content-queue webhook")
+    discord_webhook_mfd_published:       str = Field(default="", description="#mfd-published webhook")
+    # 🤖 ARTIFICIAL EDUCATION
+    discord_webhook_ae_content_queue:    str = Field(default="", description="#ae-content-queue webhook")
+    discord_webhook_ae_newsletter_queue: str = Field(default="", description="#ae-newsletter-queue webhook")
+    discord_webhook_ae_published:        str = Field(default="", description="#ae-published webhook")
+    # 🏗️ BRAND PIPELINE
+    discord_webhook_brand_ideas:         str = Field(default="", description="#brand-ideas webhook")
+    discord_bot_token: str = Field(default="", description="Bot token — required for channel creation, pinning, profile updates")
 
     # ── External APIs ─────────────────────────────────────────────────────────
     finnhub_api_key:       str = Field(default="", description="Finnhub free API key — finnhub.io")

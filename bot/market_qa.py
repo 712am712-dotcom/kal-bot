@@ -75,10 +75,12 @@ def check_price_sanity(asset: str, value: float) -> tuple[bool, str]:
 # ── Financial channels that receive market-status context ─────────────────────
 FINANCIAL_CHANNELS: frozenset[str] = frozenset({
     "morning-brief",
-    "attention",
+    "the-trade-today",
+    "mfd-the-trade-today",
+    "ae-attention",
     "breaking",
     "patterns",
-    "content-queue",
+    "ae-content-queue",
 })
 
 # ── Market status cache ───────────────────────────────────────────────────────
