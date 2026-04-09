@@ -93,6 +93,13 @@ _credit_error_active: bool = False   # credit alert already posted once
 _credits_exhausted:   bool = False   # both primary+fallback failed → 30 min pause
 _error_cooldown: dict[str, datetime.datetime] = {}  # key → last Discord post time
 
+# ── Trade Today cache ─────────────────────────────────────────────────────────
+# _gmail_brief_task extracts The Trade Today section when it builds the brief
+# and stores it here. _trade_today_task reads it at 5:55am ET and posts it to
+# both #the-trade-today and #mfd-the-trade-today, then clears the cache.
+# This keeps Trade Today independent of whenever the full brief posts.
+_trade_today_cache: dict[str, str] = {}  # {"date": "YYYY-MM-DD", "focus": "..."}
+
 # ── Analysis cache (cost control — Issue 5) ───────────────────────────────────
 # After analyzing a market with low confidence, cache the result for 2 hours.
 # Skip re-analysis unless crowd price moved >5% or the TTL expired.
@@ -1663,11 +1670,17 @@ async def _gmail_brief_task(
     model_override_fn=None,  # callable() → str | None
 ) -> None:
     """
-    Posts the morning brief once per day between 5:30–9:00am ET (10:30–14:00 UTC).
+    Posts the morning brief once per day between 5:00–9:00am ET (10:00–14:00 UTC).
     Checks every 10 minutes. Posts as soon as any newsletters are found.
     At 9:00am ET the window closes -- whatever arrived by then is used.
     Zero Claude calls if no newsletters arrive at all.
+
+    Trade Today is NOT posted here — it is extracted and cached in
+    _trade_today_cache, then posted independently by _trade_today_task at
+    5:55am ET so it always leads the brief.
     """
+    global _trade_today_cache
+
     # Build sender list -- prefer NEWSLETTER_EMAILS (multi), fall back to NEWSLETTER_EMAIL
     raw = getattr(settings, "newsletter_emails", "") or getattr(settings, "newsletter_email", "")
     senders = [s.strip() for s in raw.split(",") if s.strip()]
@@ -1681,11 +1694,8 @@ async def _gmail_brief_task(
         await asyncio.sleep(600)  # check every 10 minutes
 
         now_utc = datetime.datetime.utcnow()
-        # 5:30–9:00am ET == 10:30–14:00 UTC
-        in_window = (
-            (now_utc.hour == 10 and now_utc.minute >= 30)
-            or (11 <= now_utc.hour < 14)
-        )
+        # 5:00–9:00am ET == 10:00–14:00 UTC
+        in_window = (10 <= now_utc.hour < 14)
         if not in_window:
             continue
 
@@ -1732,17 +1742,77 @@ async def _gmail_brief_task(
                 model_override=model_ov,
             )
 
-            await discord.notify_morning_brief(brief)
-
+            # Cache Trade Today for _trade_today_task — do NOT post it here.
+            # _trade_today_task fires at 5:55am ET and posts it independently.
             focus = extract_todays_focus(brief)
+            today_str = datetime.date.today().isoformat()
             if focus:
-                await discord.notify_todays_focus(focus)
+                _trade_today_cache = {"date": today_str, "focus": focus}
+                log.info("[brief_task] trade_today cached (%d chars)", len(focus))
 
+            await discord.notify_morning_brief(brief)
             gmail.mark_posted()
             log.info("[brief_task] morning brief posted (%d sources), cost=$%.4f", len(newsletters), cost)
 
         except Exception as exc:
             log.warning("[brief_task] failed: %s", exc)
+
+
+async def _trade_today_task() -> None:
+    """
+    Posts The Trade Today to #the-trade-today and #mfd-the-trade-today at
+    exactly 5:55am ET every day, independent of the morning brief.
+
+    Timeline:
+      - 5:00am ET: brief window opens, newsletters start arriving
+      - 5:55am ET: this task fires; posts from cache if brief already built
+      - 5:55–6:00am: if cache is empty (brief not yet built), polls every 30s
+      - 6:00am ET: hard cutoff — logs a warning and skips today if still empty
+
+    5:55am ET == 10:55 UTC.  Hard cutoff 6:00am ET == 11:00 UTC.
+    """
+    global _trade_today_cache
+
+    while True:
+        now_utc = datetime.datetime.utcnow()
+
+        # Sleep until 10:55 UTC (5:55am ET) — recalculate each iteration
+        target = now_utc.replace(hour=10, minute=55, second=0, microsecond=0)
+        if now_utc >= target:
+            # Already past 5:55am today — advance to tomorrow
+            target += datetime.timedelta(days=1)
+
+        sleep_secs = (target - now_utc).total_seconds()
+        log.debug("[trade_today_task] sleeping %.0fs until 5:55am ET", sleep_secs)
+        await asyncio.sleep(sleep_secs)
+
+        today_str = datetime.date.today().isoformat()
+
+        # Poll every 30s for up to 5 minutes (5:55–6:00am) waiting for the brief
+        deadline_utc = datetime.datetime.utcnow().replace(
+            hour=11, minute=0, second=0, microsecond=0
+        )
+        posted = False
+        while datetime.datetime.utcnow() < deadline_utc:
+            if (
+                _trade_today_cache.get("date") == today_str
+                and _trade_today_cache.get("focus")
+            ):
+                focus = _trade_today_cache["focus"]
+                try:
+                    await discord.notify_todays_focus(focus)
+                    log.info("[trade_today_task] posted to #the-trade-today + #mfd-the-trade-today")
+                except Exception as exc:
+                    log.warning("[trade_today_task] post failed: %s", exc)
+                posted = True
+                break
+            await asyncio.sleep(30)
+
+        if not posted:
+            log.warning(
+                "[trade_today_task] 6:00am ET cutoff reached — no Trade Today available today. "
+                "Brief may not have run or newsletters arrived late."
+            )
 
 
 # ── Axios breaking news alerts task ───────────────────────────────────────────
@@ -2381,6 +2451,7 @@ async def main_async() -> None:
             # Intelligence-only mode: run all intelligence tasks but no trading
             log.info("intelligence_only_mode_active")
             asyncio.create_task(_gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
+            asyncio.create_task(_trade_today_task())
             asyncio.create_task(_axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
             asyncio.create_task(_rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn))
             asyncio.create_task(_scheduled_analysis_task(ta_analyzer, tracker, kalshi, model_override_fn=_model_override_fn))
@@ -2424,6 +2495,7 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
+            trade_today_task  = asyncio.create_task(_trade_today_task())
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
@@ -2505,6 +2577,7 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
+            trade_today_task  = asyncio.create_task(_trade_today_task())
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
