@@ -1967,37 +1967,23 @@ async def _mfd_newsletter_task(model_override_fn=None) -> None:
                     await asyncio.sleep(300)
                     continue
 
-                # POST to Beehiiv
-                beehiiv_id: str | None = None
-                bk = getattr(settings, "beehiiv_api_key", "")
-                bp = getattr(settings, "beehiiv_mfd_publication_id", "")
-                if bk and bp:
-                    beehiiv_id = await _mfd.post_to_beehiiv(
-                        html=result["html"],
-                        subject=result["subject_a"],
-                        preview_text=result["preview_text"],
-                        api_key=bk,
-                        publication_id=bp,
-                    )
-                else:
-                    log.warning("[mfd-newsletter] BEEHIIV_API_KEY or BEEHIIV_MFD_PUBLICATION_ID not set — skipping Beehiiv upload")
-
-                # Post to #mfd-newsletter-queue
+                # Post header + HTML + plain text to #mfd-newsletter-queue
                 await discord.notify_mfd_newsletter_draft(
                     subject_a=result["subject_a"],
                     subject_b=result["subject_b"],
                     subject_c=result["subject_c"],
                     preview_text=result["preview_text"],
-                    beehiiv_id=beehiiv_id,
+                    html=result["html"],
+                    plain_text=result.get("plain_text", ""),
                 )
 
-                # Log to Supabase
+                # Log to Supabase (no beehiiv_id — Discord fallback mode)
                 await _mfd.log_newsletter_dispatch(
                     subject=result["subject_a"],
-                    beehiiv_id=beehiiv_id,
+                    beehiiv_id=None,
                 )
 
-                log.info("[mfd-newsletter] pipeline complete, beehiiv_id=%s", beehiiv_id)
+                log.info("[mfd-newsletter] pipeline complete — draft posted to #mfd-newsletter-queue")
 
             except Exception as exc:
                 log.warning("[mfd-newsletter] pipeline failed: %s", exc)

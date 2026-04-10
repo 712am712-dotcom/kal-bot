@@ -27,9 +27,45 @@ import httpx
 
 from config import settings
 
+import re
+
 log = logging.getLogger(__name__)
 
 BEEHIIV_API_BASE = "https://api.beehiiv.com/v2"
+
+
+# ── HTML → plain text ─────────────────────────────────────────────────────────
+
+def html_to_plain(html: str) -> str:
+    """
+    Convert the generated newsletter HTML to readable plain text for Discord preview.
+    Strips all tags, normalises whitespace, preserves paragraph breaks.
+    """
+    # Section headers (uppercase text in <p> tags) → add blank line + header
+    text = re.sub(
+        r'<p[^>]*style="[^"]*text-transform:\s*uppercase[^"]*"[^>]*>(.*?)</p>',
+        lambda m: f"\n\n── {m.group(1).strip().upper()} ──\n",
+        html, flags=re.IGNORECASE | re.DOTALL,
+    )
+    # <br> and <hr> → newlines
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<hr[^>]*>', '\n' + '─' * 40 + '\n', text, flags=re.IGNORECASE)
+    # <strong> / <b> → **bold**
+    text = re.sub(r'<strong>(.*?)</strong>', r'**\1**', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<b>(.*?)</b>', r'**\1**', text, flags=re.IGNORECASE | re.DOTALL)
+    # <em> / <i> → _italic_
+    text = re.sub(r'<em>(.*?)</em>', r'_\1_', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<i>(.*?)</i>', r'_\1_', text, flags=re.IGNORECASE | re.DOTALL)
+    # </p> and </div> → paragraph break
+    text = re.sub(r'</p>|</div>', '\n\n', text, flags=re.IGNORECASE)
+    # Strip remaining tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Decode HTML entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>') \
+               .replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
+    # Collapse 3+ consecutive newlines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 # ── Claude prompts ─────────────────────────────────────────────────────────────
 
@@ -220,6 +256,9 @@ async def generate_mfd_newsletter(
         if missing:
             log.warning("[mfd-newsletter] missing keys from Claude: %s", missing)
             return None
+
+        # Add plain text version for Discord readability
+        result["plain_text"] = html_to_plain(result["html"])
 
         return result
 

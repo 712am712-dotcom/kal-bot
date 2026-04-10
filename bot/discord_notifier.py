@@ -1533,21 +1533,20 @@ async def notify_mfd_newsletter_draft(
     subject_b: str,
     subject_c: str,
     preview_text: str,
-    beehiiv_id: str | None,
+    html: str,
+    plain_text: str,
 ) -> None:
     """
     Post the MFD newsletter draft to #mfd-newsletter-queue.
-    Includes the 3 subject line options and the Beehiiv draft ID.
+
+    Three messages in sequence:
+      1. Header embed — subject lines A/B/C, preview text, instructions
+      2. Full HTML source (code block, chunked to 1990 chars each)
+      3. Plain-text readable version (chunked to 1990 chars each)
     """
-    status_line = (
-        f"✅ **Beehiiv draft created** — ID: `{beehiiv_id}`"
-        if beehiiv_id
-        else "⚠️ **Beehiiv upload failed** — review HTML manually"
-    )
-    lines = [
+    # ── Message 1: header with subjects + instructions ────────────────────────
+    header_lines = [
         f"📰 **MFD Newsletter Draft Ready** — {_now_et()}",
-        "",
-        status_line,
         "",
         "**Subject line options:**",
         f"**A** (provocative fact) — {subject_a}",
@@ -1556,13 +1555,46 @@ async def notify_mfd_newsletter_draft(
         "",
         f"**Preview text:** _{preview_text}_",
         "",
-        "_Pick a subject line and send from Beehiiv._",
+        "**To send:** Copy HTML below → paste into Beehiiv new post → select subject line → send",
     ]
     await _send(
         "mfd-newsletter-queue",
-        _embed("\n".join(lines), COLOR_GOLD, footer=f"mfd-newsletter · {_now_et()}"),
+        _embed("\n".join(header_lines), COLOR_GOLD, footer=f"mfd-newsletter · {_now_et()}"),
         message_type="mfd-newsletter",
     )
+
+    # ── Message 2: full HTML (chunked) ────────────────────────────────────────
+    # Wrap in code block so Discord doesn't render it
+    html_chunks = _chunk_text(html, 1980)
+    for i, chunk in enumerate(html_chunks):
+        label = f"**HTML ({i + 1}/{len(html_chunks)}):**\n" if len(html_chunks) > 1 else "**HTML:**\n"
+        await _send(
+            "mfd-newsletter-queue",
+            {"content": label + f"```html\n{chunk}\n```", "username": KAL},
+        )
+
+    # ── Message 3: plain text readable version (chunked) ─────────────────────
+    plain_chunks = _chunk_text(plain_text, 1990)
+    for i, chunk in enumerate(plain_chunks):
+        label = f"**Plain text ({i + 1}/{len(plain_chunks)}):**\n" if len(plain_chunks) > 1 else "**Plain text preview:**\n"
+        await _send(
+            "mfd-newsletter-queue",
+            {"content": label + chunk, "username": KAL},
+        )
+
+
+def _chunk_text(text: str, max_len: int) -> list[str]:
+    """Split text into chunks of at most max_len characters, breaking on newlines where possible."""
+    chunks: list[str] = []
+    while len(text) > max_len:
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
 
 
 async def notify_idea(idea_text: str) -> None:
