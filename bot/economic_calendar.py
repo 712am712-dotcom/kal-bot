@@ -81,6 +81,19 @@ def mark_daily_alert_posted() -> None:
     _write_state(state)
 
 
+def day_before_alert_already_posted() -> bool:
+    """True if today's evening day-before preview has already fired."""
+    state = _read_state()
+    today = datetime.date.today().isoformat()
+    return state.get("day_before_alert_date") == today
+
+
+def mark_day_before_alert_posted() -> None:
+    state = _read_state()
+    state["day_before_alert_date"] = datetime.date.today().isoformat()
+    _write_state(state)
+
+
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
 def _now_utc() -> datetime.datetime:
@@ -88,15 +101,29 @@ def _now_utc() -> datetime.datetime:
 
 
 def _is_sunday_8am_et() -> bool:
-    """True between 13:00–13:59 UTC on Sundays (8am ET)."""
+    """True between 13:00–13:59 UTC on Sundays (8am ET / EDT)."""
     now = _now_utc()
     return now.weekday() == 6 and now.hour == 13
 
 
+def _is_monday_9am_et() -> bool:
+    """True between 14:00–14:59 UTC on Mondays (9am ET / EDT).
+    Fallback in case Sunday weekly post was missed due to a redeploy."""
+    now = _now_utc()
+    return now.weekday() == 0 and now.hour == 14
+
+
 def _is_weekday_7am_et() -> bool:
-    """True between 12:00–12:59 UTC on weekdays (7am ET)."""
+    """True between 12:00–12:59 UTC on weekdays (7am ET / EDT)."""
     now = _now_utc()
     return now.weekday() < 5 and now.hour == 12
+
+
+def _is_evening_preview_utc() -> bool:
+    """True between 01:00–01:59 UTC (9pm EDT / 10pm EST).
+    Used for the evening day-before macro event preview."""
+    now = _now_utc()
+    return now.hour == 1
 
 
 # ── Free data source helpers ──────────────────────────────────────────────────
@@ -440,3 +467,170 @@ def _event_why(event_name: str) -> str:
     if "retail" in n:
         return "consumer spending health"
     return ""
+
+
+def _event_market_implications(event_name: str) -> tuple[str, str]:
+    """
+    Return (hotter_than_expected, cooler_than_expected) market implication strings
+    for a given event. Used in the day-before alert and morning-brief banner.
+    """
+    n = event_name.lower()
+    if "cpi" in n:
+        return (
+            "bonds sell off, yields spike, stocks drop — rate cut odds fall",
+            "rate cut odds rise, stocks rally, dollar weakens",
+        )
+    if "pce" in n:
+        return (
+            "Fed stays hawkish, equities under pressure",
+            "rate cut expectations advance, risk-on rally",
+        )
+    if "ppi" in n:
+        return (
+            "upstream inflation pressures CPI outlook, yields rise",
+            "inflation pipeline cools, bonds rally",
+        )
+    if "payroll" in n or "nonfarm" in n or "jobs" in n:
+        return (
+            "hot labor market → Fed stays higher for longer, growth stocks fall",
+            "labor market cracks → recession risk rises, safe havens rally",
+        )
+    if "unemployment" in n:
+        return (
+            "tight labor market → Fed stays hawkish",
+            "rising unemployment → recession risk, rate cuts priced in",
+        )
+    if "fomc" in n or "fed" in n or "rate decision" in n:
+        return (
+            "hawkish surprises → bonds sell off, yields spike, dollar up",
+            "dovish tone → equities and crypto rally, dollar weakens",
+        )
+    if "gdp" in n:
+        return (
+            "strong growth → inflation fears, yields rise, dollar up",
+            "weak growth → recession fears, safe havens rally",
+        )
+    if "retail" in n:
+        return (
+            "consumer spending strong → inflation sticky, yields up",
+            "consumer weakening → recession concerns, rate cut bets rise",
+        )
+    return ("above-consensus → yields rise, risk-off", "below-consensus → yields fall, risk-on")
+
+
+# ── Morning brief macro banner ─────────────────────────────────────────────────
+
+async def build_today_macro_banner() -> str:
+    """
+    Returns a formatted ⚠️ banner for any HIGH impact USD events happening today.
+    Prepended to the morning brief at build time.
+    Returns "" if nothing significant today.
+
+    Called from _gmail_brief_task immediately before build_morning_brief().
+    Zero Claude calls.
+    """
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    events = await _fetch_ff_calendar(next_week=False)
+    high = [
+        e for e in events
+        if _impact_label(e.get("impact")) == "HIGH"
+        and e.get("date", "") == today_str
+    ]
+    if not high:
+        return ""
+
+    lines: list[str] = []
+    for e in high[:3]:
+        name     = e.get("event", "Economic Event")
+        time_str = e.get("time_et", "").strip()
+        forecast = str(e.get("forecast", "")).strip()
+        previous = str(e.get("previous", "")).strip()
+        hot, cool = _event_market_implications(name)
+
+        time_display = f" at **{time_str} ET**" if time_str and time_str not in ("Tentative", "All Day", "TBD", "") else ""
+        est_line = ""
+        if forecast or previous:
+            parts = []
+            if forecast:
+                parts.append(f"Estimate: **{forecast}**")
+            if previous:
+                parts.append(f"Previous: {previous}")
+            est_line = " | ".join(parts)
+
+        lines.append(f"⚠️ **TODAY: {name}{time_display}**")
+        if est_line:
+            lines.append(est_line)
+        lines.append(f"If hotter → {hot}.")
+        lines.append(f"If cooler → {cool}.")
+        lines.append("Watch this number above everything else today.")
+        lines.append("─" * 48)
+
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
+# ── Evening day-before preview ─────────────────────────────────────────────────
+
+async def get_tomorrow_high_impact_events() -> list[dict]:
+    """
+    Fetch HIGH impact USD events scheduled for tomorrow.
+    Checks both this-week and next-week FF feeds (covers Sunday→Monday boundary).
+    Returns list of event dicts or [].
+    """
+    tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Fetch both feeds in parallel — tomorrow might be in next week's feed
+    import asyncio as _asyncio
+    this_week, next_week = await _asyncio.gather(
+        _fetch_ff_calendar(next_week=False),
+        _fetch_ff_calendar(next_week=True),
+    )
+    all_events = this_week + next_week
+
+    return [
+        e for e in all_events
+        if _impact_label(e.get("impact")) == "HIGH"
+        and e.get("date", "") == tomorrow_str
+    ]
+
+
+def build_day_before_alert(events: list[dict]) -> str:
+    """
+    Format the evening day-before macro preview.
+    Returns "" if events list is empty.
+    Posted to #morning-brief and #mfd-morning-brief at ~9pm ET.
+    """
+    if not events:
+        return ""
+
+    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+    day_label = tomorrow.strftime("%A, %B ") + str(tomorrow.day)
+
+    lines = [f"📅 **Tomorrow — {day_label}**", ""]
+
+    for e in events[:3]:
+        name     = e.get("event", "Economic Event")
+        time_str = e.get("time_et", "").strip()
+        forecast = str(e.get("forecast", "")).strip()
+        previous = str(e.get("previous", "")).strip()
+        why      = _event_why(name)
+        hot, cool = _event_market_implications(name)
+
+        time_display = f"**{time_str} ET**" if time_str and time_str not in ("Tentative", "All Day", "TBD", "") else "**scheduled**"
+        lines.append(f"**{name}** at {time_display}")
+        if why:
+            lines.append(f"_{why.capitalize()}_")
+        if forecast or previous:
+            parts = []
+            if forecast:
+                parts.append(f"Estimate: **{forecast}**")
+            if previous:
+                parts.append(f"Previous: {previous}")
+            lines.append(" | ".join(parts))
+        lines.append(f"If hotter → {hot}.")
+        lines.append(f"If cooler → {cool}.")
+        lines.append("")
+
+    lines.append("_Set your alarm. These numbers move markets._")
+    return "\n".join(lines)

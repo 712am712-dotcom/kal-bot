@@ -42,19 +42,21 @@ log = logging.getLogger(__name__)
 
 FRED_BASE = "https://api.stlouisfed.org/fred"
 
-# (series_id, key_name, unit, human_label)
-FRED_SERIES: list[tuple[str, str, str, str]] = [
-    ("DFF",              "fed_funds_rate", "%",  "Fed Funds Rate"),
-    ("DGS2",             "yield_2y",       "%",  "2-Year Treasury"),
-    ("DGS10",            "yield_10y",      "%",  "10-Year Treasury"),
-    ("DGS30",            "yield_30y",      "%",  "30-Year Treasury"),
-    ("T10Y2Y",           "yield_curve",    "%",  "10Y-2Y Yield Curve"),
-    ("CPIAUCSL",         "cpi",            "idx","CPI (all items)"),
-    ("UNRATE",           "unemployment",   "%",  "Unemployment Rate"),
-    ("DCOILWTICO",       "oil_wti",        "$",  "WTI Crude Oil"),
-    ("GOLDPMGBD228NLBM", "gold",           "$",  "Gold (LBMA PM)"),
-    ("MORTGAGE30US",     "mortgage_30y",   "%",  "30-Year Mortgage Rate"),
-    ("BAMLH0A0HYM2",     "hy_spread",      "%",  "High Yield Bond Spread"),
+# (series_id, key_name, unit, human_label, fred_units)
+# fred_units: "lin" = raw level, "pc1" = year-over-year % change, "pch" = 1-period % change
+# CPIAUCSL raw value is an index level (~314). Using "pc1" gives the YoY inflation rate (~2.8%).
+FRED_SERIES: list[tuple[str, str, str, str, str]] = [
+    ("DFF",              "fed_funds_rate", "%",  "Fed Funds Rate",        "lin"),
+    ("DGS2",             "yield_2y",       "%",  "2-Year Treasury",       "lin"),
+    ("DGS10",            "yield_10y",      "%",  "10-Year Treasury",      "lin"),
+    ("DGS30",            "yield_30y",      "%",  "30-Year Treasury",      "lin"),
+    ("T10Y2Y",           "yield_curve",    "%",  "10Y-2Y Yield Curve",    "lin"),
+    ("CPIAUCSL",         "cpi",            "%",  "CPI YoY%",              "pc1"),  # pc1 = YoY% change — avoids the "327%" bug from raw index
+    ("UNRATE",           "unemployment",   "%",  "Unemployment Rate",     "lin"),
+    ("DCOILWTICO",       "oil_wti",        "$",  "WTI Crude Oil",         "lin"),
+    ("GOLDPMGBD228NLBM", "gold",           "$",  "Gold (LBMA PM)",        "lin"),
+    ("MORTGAGE30US",     "mortgage_30y",   "%",  "30-Year Mortgage Rate", "lin"),
+    ("BAMLH0A0HYM2",     "hy_spread",      "%",  "High Yield Bond Spread","lin"),
 ]
 
 
@@ -64,8 +66,14 @@ class FredClient:
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
 
-    async def _get_series(self, series_id: str) -> float | None:
-        """Fetch the most recent non-null value for a FRED series."""
+    async def _get_series(self, series_id: str, units: str = "lin") -> float | None:
+        """Fetch the most recent non-null value for a FRED series.
+
+        units:
+          "lin"  — raw level (default for rates, prices)
+          "pc1"  — year-over-year percent change (use for CPI to get ~2.8%, not ~314)
+          "pch"  — 1-period percent change
+        """
         url = f"{FRED_BASE}/series/observations"
         params = {
             "series_id":        series_id,
@@ -74,6 +82,7 @@ class FredClient:
             "sort_order":       "desc",
             "limit":            10,        # last 10 — skip any '.' missing entries
             "observation_start": "2020-01-01",
+            "units":            units,
         }
         try:
             async with httpx.AsyncClient(timeout=15.0) as c:
@@ -101,7 +110,7 @@ class FredClient:
             return {}
 
         results: dict[str, Any] = {}
-        coros = [(label, self._get_series(sid)) for sid, label, _, _ in FRED_SERIES]
+        coros = [(label, self._get_series(sid, fu)) for sid, label, _, _, fu in FRED_SERIES]
         fetched = await asyncio.gather(*[c for _, c in coros], return_exceptions=True)
         for (label, _), value in zip(coros, fetched):
             results[label] = value if not isinstance(value, Exception) else None
@@ -217,7 +226,7 @@ class FredClient:
 
         lines = [
             "**KEY ECONOMIC DATA:**",
-            f"- CPI inflation: {self._pct(data.get('cpi'), decimals=1)}",
+            f"- CPI inflation (YoY): {self._pct(data.get('cpi'), decimals=1)}",
             f"- Unemployment: {self._pct(data.get('unemployment'), decimals=1)}",
             f"- WTI Crude: {self._dollar(oil_wti)}",
             f"- Gold: {self._dollar(gold)}",

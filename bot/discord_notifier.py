@@ -1449,8 +1449,17 @@ async def notify_economic_calendar_weekly(content: str) -> None:
 
 
 async def notify_daily_calendar_alert(alert: str) -> None:
-    """Post a one-line economic event alert to #morning-brief (weekday 7am)."""
-    await _send("morning-brief", {"content": alert, "username": KAL})
+    """Post a one-line economic event alert to #morning-brief and #mfd-morning-brief (weekday 7am)."""
+    payload = {"content": alert, "username": KAL}
+    await _send("morning-brief",     payload)
+    await _send("mfd-morning-brief", payload)
+
+
+async def notify_day_before_macro_alert(alert: str) -> None:
+    """Post the evening day-before macro preview to #morning-brief and #mfd-morning-brief (~9pm ET)."""
+    payload = _embed(alert, COLOR_GOLD, footer=f"tomorrow's calendar · {_now_et()}")
+    await _send("morning-brief",     payload)
+    await _send("mfd-morning-brief", payload)
 
 
 async def notify_market_open(content: str) -> None:

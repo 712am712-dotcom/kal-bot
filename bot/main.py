@@ -51,9 +51,11 @@ from performance_tracker import PerformanceTracker
 import journal as journal_mod
 from economic_calendar import (
     post_weekly_calendar, get_daily_calendar_alert,
+    build_today_macro_banner, get_tomorrow_high_impact_events, build_day_before_alert,
     weekly_already_posted, mark_weekly_posted,
     daily_alert_already_posted, mark_daily_alert_posted,
-    _is_sunday_8am_et, _is_weekday_7am_et,
+    day_before_alert_already_posted, mark_day_before_alert_posted,
+    _is_sunday_8am_et, _is_monday_9am_et, _is_weekday_7am_et, _is_evening_preview_utc,
 )
 from market_snapshot import (
     build_market_open, build_market_close,
@@ -1738,11 +1740,25 @@ async def _gmail_brief_task(
                 log.warning("[brief_task] market data fetch failed: %s", _mde)
                 market_data = {}
 
+            # Prepend today's macro event banner BEFORE building the brief.
+            # This ensures CPI, FOMC, NFP etc. lead the brief on release days.
+            macro_banner = ""
+            try:
+                macro_banner = await build_today_macro_banner()
+                if macro_banner:
+                    log.info("[brief_task] macro banner injected (%d chars)", len(macro_banner))
+            except Exception as _mbe:
+                log.debug("[brief_task] macro banner failed (non-fatal): %s", _mbe)
+
             brief, cost = await build_morning_brief(
                 newsletters, markets,
                 market_data=market_data,
                 model_override=model_ov,
             )
+
+            # Prepend the macro banner to the generated brief
+            if macro_banner:
+                brief = macro_banner + brief
 
             # Cache Trade Today for _trade_today_task — do NOT post it here.
             # _trade_today_task fires at 5:55am ET and posts it independently.
@@ -2393,9 +2409,11 @@ async def _credit_check_task() -> None:
 
 async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
     """
-    Two jobs:
-      - Sunday 8am ET (13:00 UTC): post week-ahead calendar to #economic-calendar
-      - Weekday 7am ET (12:00 UTC): post daily alert to #morning-brief if HIGH events today
+    Four jobs:
+      1. Sunday 8am ET (13:00 UTC): post week-ahead calendar to #economic-calendar
+      2. Monday 9am ET (14:00 UTC): fallback in case Sunday was missed (redeploy, etc.)
+      3. Weekday 7am ET (12:00 UTC): daily alert to #morning-brief + #mfd-morning-brief if HIGH events today
+      4. ~9pm ET nightly (01:00 UTC): day-before preview if tomorrow has HIGH impact events
     Checks every 5 minutes. Zero Claude calls.
     """
     fred_key = getattr(settings, "fred_api_key", "")
@@ -2404,7 +2422,7 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
     while True:
         await asyncio.sleep(300)  # check every 5 minutes
         try:
-            # ── Sunday weekly calendar ────────────────────────────────────────
+            # ── 1. Sunday weekly calendar ─────────────────────────────────────
             if _is_sunday_8am_et() and not weekly_already_posted():
                 try:
                     resp    = await kalshi._get("/markets", params={"status": "open", "limit": 100})
@@ -2415,11 +2433,26 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
                     content = await post_weekly_calendar(fred_key, markets, av_key=av_key)
                     await discord.notify_economic_calendar_weekly(content)
                     mark_weekly_posted()
-                    log.info("[calendar_task] weekly calendar posted")
+                    log.info("[calendar_task] weekly calendar posted (Sunday)")
                 except Exception as exc:
                     log.warning("[calendar_task] weekly post failed: %s", exc)
 
-            # ── Weekday 7am daily alert ────────────────────────────────────────
+            # ── 2. Monday 9am fallback (if Sunday was missed) ─────────────────
+            if _is_monday_9am_et() and not weekly_already_posted():
+                try:
+                    resp    = await kalshi._get("/markets", params={"status": "open", "limit": 100})
+                    markets = resp.get("markets", [])
+                except Exception:
+                    markets = []
+                try:
+                    content = await post_weekly_calendar(fred_key, markets, av_key=av_key)
+                    await discord.notify_economic_calendar_weekly(content)
+                    mark_weekly_posted()
+                    log.info("[calendar_task] weekly calendar posted (Monday fallback)")
+                except Exception as exc:
+                    log.warning("[calendar_task] Monday fallback post failed: %s", exc)
+
+            # ── 3. Weekday 7am daily alert ────────────────────────────────────
             if _is_weekday_7am_et() and not daily_alert_already_posted():
                 try:
                     alert = await get_daily_calendar_alert(av_key=av_key)
@@ -2429,6 +2462,22 @@ async def _economic_calendar_task(kalshi: "KalshiClient") -> None:
                     mark_daily_alert_posted()
                 except Exception as exc:
                     log.warning("[calendar_task] daily alert failed: %s", exc)
+
+            # ── 4. ~9pm ET day-before preview ─────────────────────────────────
+            if _is_evening_preview_utc() and not day_before_alert_already_posted():
+                try:
+                    tomorrow_events = await get_tomorrow_high_impact_events()
+                    if tomorrow_events:
+                        alert_text = build_day_before_alert(tomorrow_events)
+                        if alert_text:
+                            await discord.notify_day_before_macro_alert(alert_text)
+                            log.info(
+                                "[calendar_task] day-before preview posted: %d event(s)",
+                                len(tomorrow_events),
+                            )
+                    mark_day_before_alert_posted()
+                except Exception as exc:
+                    log.warning("[calendar_task] day-before preview failed: %s", exc)
 
         except Exception as exc:
             log.warning("[calendar_task] error: %s", exc)
