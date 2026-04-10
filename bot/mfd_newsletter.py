@@ -233,6 +233,36 @@ async def generate_mfd_newsletter(
 
 # ── Beehiiv API ────────────────────────────────────────────────────────────────
 
+async def _log_beehiiv_error(status_code: int, body: str, url: str) -> None:
+    """Log a Beehiiv API error to Railway logs and Supabase system-logs."""
+    msg = f"[mfd-beehiiv-error] POST {url} → HTTP {status_code}\n{body[:2000]}"
+    # Always print to Railway logs (visible in `railway logs`)
+    print(msg, flush=True)
+    log.warning(msg)
+    # Also persist to Supabase so it's visible in the dashboard
+    try:
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            return
+        supa_url = f"{settings.supabase_url}/rest/v1/bot_communications"
+        headers = {
+            "apikey":        settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            "Content-Type":  "application/json",
+            "Prefer":        "return=minimal",
+        }
+        row = {
+            "channel":         "system-logs",
+            "message_type":    "mfd-beehiiv-error",
+            "content":         msg,
+            "delivery_method": "beehiiv",
+            "status":          "failed",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            await c.post(supa_url, headers=headers, json=row)
+    except Exception as exc:
+        log.debug("[mfd-newsletter] could not persist beehiiv error to supabase: %s", exc)
+
+
 async def post_to_beehiiv(
     html: str,
     subject: str,
@@ -241,18 +271,27 @@ async def post_to_beehiiv(
     publication_id: str,
 ) -> str | None:
     """
-    POST a draft newsletter to Beehiiv.
+    POST a draft newsletter to Beehiiv V2.
     Returns the Beehiiv post ID on success, None on failure.
+
+    Beehiiv V2 POST /v2/publications/{publicationId}/posts
+    Required: title
+    Content:  body_content (HTML string) — inline styles only, no <style>/<link> tags
     """
+    # Beehiiv V2 requires publication ID in format pub_XXXX.
+    # Normalize: add prefix if the env var was set without it.
+    if not publication_id.startswith("pub_"):
+        publication_id = f"pub_{publication_id}"
+    url = f"{BEEHIIV_API_BASE}/publications/{publication_id}/posts"
+    # content_type is not a valid V2 field — omit it to avoid 400 errors.
+    # body_content accepts raw HTML with inline styles.
+    payload = {
+        "title":         subject,
+        "subtitle":      preview_text,
+        "status":        "draft",
+        "body_content":  html,
+    }
     try:
-        url = f"{BEEHIIV_API_BASE}/publications/{publication_id}/posts"
-        payload = {
-            "title":          subject,
-            "subtitle":       preview_text,
-            "status":         "draft",
-            "body_content":   html,
-            "content_type":   "html",
-        }
         async with httpx.AsyncClient(timeout=30.0) as c:
             r = await c.post(
                 url,
@@ -267,10 +306,13 @@ async def post_to_beehiiv(
             post_id = data.get("data", {}).get("id") or data.get("id", "unknown")
             log.info("[mfd-newsletter] Beehiiv draft created: %s", post_id)
             return str(post_id)
-        log.warning("[mfd-newsletter] Beehiiv %s: %s", r.status_code, r.text[:400])
+        # Capture full error details
+        await _log_beehiiv_error(r.status_code, r.text, url)
         return None
     except Exception as exc:
-        log.warning("[mfd-newsletter] Beehiiv post failed: %s", exc)
+        err_msg = f"[mfd-beehiiv-error] exception posting to {url}: {exc}"
+        print(err_msg, flush=True)
+        log.warning(err_msg)
         return None
 
 
