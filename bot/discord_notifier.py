@@ -1468,6 +1468,57 @@ async def notify_rss_intel(post: str) -> None:
     await _send("market-pulse", _embed(post, COLOR_BLUE), message_type="rss_intel")
 
 
+async def notify_newsletter_signal(
+    from_name: str,
+    focus: str,
+    subject: str,
+    thesis: str,
+    trade_ideas: list[str],
+    tickers: list[str],
+    signal_score: int,
+    urgency: str,
+    one_liner: str,
+) -> None:
+    """
+    Post a tier-1 newsletter intelligence signal to #intelligence-feed.
+    Called by _newsletter_intel_task after Claude evaluates a new tier-1 email.
+    """
+    urgency_label = {"now": "⚡ ACT NOW", "today": "📅 TODAY", "week": "📆 THIS WEEK"}.get(
+        urgency.lower(), urgency.upper()
+    )
+    score_bar = "█" * min(signal_score, 10) + "░" * (10 - min(signal_score, 10))
+
+    lines = [
+        f"📡 **{from_name}** — {one_liner}",
+        f"_{focus}_",
+        "",
+        f"**Subject:** {subject[:120]}",
+        "",
+        f"**Thesis:** {thesis}",
+    ]
+
+    if trade_ideas:
+        lines.append("")
+        lines.append("**Trade ideas:**")
+        for idea in trade_ideas[:5]:
+            lines.append(f"• {idea}")
+
+    if tickers:
+        lines.append("")
+        lines.append(f"**Assets mentioned:** {' · '.join(tickers[:8])}")
+
+    lines += [
+        "",
+        f"**Signal:** {score_bar} {signal_score}/10 · {urgency_label}",
+    ]
+
+    await _send(
+        "intelligence-feed",
+        _embed("\n".join(lines), COLOR_GOLD, footer=f"tier-1 intel · {_now_et()}"),
+        message_type="newsletter_intel",
+    )
+
+
 async def notify_idea(idea_text: str) -> None:
     """Post a content opportunity to #content-queue (formerly #ideas)."""
     await _send("content-queue", {"content": idea_text, "username": KAL})

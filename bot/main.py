@@ -44,6 +44,8 @@ from scheduled_analysis import (
 )
 from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus, evaluate_axios_alert
 import email_reader as _er
+import newsletter_intel as _ni
+from newsletter_intel import NewsletterIntelScanner, build_conflict_note, get_recent_tier1_intel
 from technical_analysis import TechnicalAnalyzer
 from performance_tracker import PerformanceTracker
 import journal as journal_mod
@@ -1744,10 +1746,22 @@ async def _gmail_brief_task(
 
             # Cache Trade Today for _trade_today_task — do NOT post it here.
             # _trade_today_task fires at 5:55am ET and posts it independently.
+            # Before caching, run a conflict/confirm check against recent tier-1 intel.
             focus = extract_todays_focus(brief)
             today_str = datetime.date.today().isoformat()
             if focus:
-                _trade_today_cache = {"date": today_str, "focus": focus}
+                conflict_note = ""
+                try:
+                    recent_intel = await get_recent_tier1_intel(hours=24)
+                    conflict_note = build_conflict_note(focus, recent_intel)
+                    if conflict_note:
+                        log.info("[brief_task] conflict note appended to Trade Today")
+                except Exception as _ce:
+                    log.debug("[brief_task] conflict check failed (non-fatal): %s", _ce)
+                _trade_today_cache = {
+                    "date":  today_str,
+                    "focus": focus + conflict_note,
+                }
                 log.info("[brief_task] trade_today cached (%d chars)", len(focus))
 
             await discord.notify_morning_brief(brief)
@@ -1813,6 +1827,66 @@ async def _trade_today_task() -> None:
                 "[trade_today_task] 6:00am ET cutoff reached — no Trade Today available today. "
                 "Brief may not have run or newsletters arrived late."
             )
+
+
+# ── Tier-1 newsletter intelligence task ───────────────────────────────────────
+
+async def _newsletter_intel_task(
+    intel_scanner: "NewsletterIntelScanner",
+    model_override_fn=None,
+) -> None:
+    """
+    Scan for new tier-1 newsletter emails every 30 minutes throughout the day.
+    Evaluates each via Claude and posts a structured signal to #intelligence-feed.
+    Posts are also logged to Supabase (message_type=newsletter_intel) for the
+    Trade Today conflict/confirm cross-check in _gmail_brief_task.
+
+    Starts with an immediate scan on launch (catches emails like the Citrini
+    Apr 8 12:03pm email that arrived before the scanner was deployed).
+    """
+    # Run once immediately at startup to catch any backlogged tier-1 emails
+    initial_delay_done = False
+
+    while True:
+        if initial_delay_done:
+            await asyncio.sleep(1800)  # 30 minutes between scans
+        else:
+            await asyncio.sleep(60)    # 60s after startup before first scan
+            initial_delay_done = True
+
+        if not intel_scanner.is_configured:
+            continue
+
+        model_ov = model_override_fn() if model_override_fn else None
+        active_model = model_ov or settings.claude_model
+
+        async def _post_signal(email_data: dict, result: dict) -> None:
+            """Post evaluated tier-1 signal to #intelligence-feed."""
+            try:
+                await discord.notify_newsletter_signal(
+                    from_name=email_data["from_name"],
+                    focus=email_data.get("focus", ""),
+                    subject=email_data["subject"],
+                    thesis=result.get("thesis", ""),
+                    trade_ideas=result.get("trade_ideas", []),
+                    tickers=result.get("tickers", []),
+                    signal_score=int(result.get("signal_score", 5)),
+                    urgency=result.get("urgency", "today"),
+                    one_liner=result.get("one_liner", email_data["subject"][:80]),
+                )
+            except Exception as exc:
+                log.warning("[newsletter-intel] post_signal failed: %s", exc)
+
+        try:
+            n = await intel_scanner.scan(
+                api_key=settings.anthropic_api_key,
+                model=active_model,
+                post_fn=_post_signal,
+            )
+            if n > 0:
+                log.info("[newsletter-intel] scan complete, evaluated %d email(s)", n)
+        except Exception as exc:
+            log.warning("[newsletter-intel] scan cycle failed: %s", exc)
 
 
 # ── Axios breaking news alerts task ───────────────────────────────────────────
@@ -2419,6 +2493,11 @@ async def main_async() -> None:
         imap_address=_imap_addr,
         imap_password=_imap_pass,
     )
+    # Tier-1 newsletter intelligence scanner — same IMAP credentials as gmail_reader
+    newsletter_intel_scanner = NewsletterIntelScanner(
+        imap_address=_imap_addr,
+        imap_password=_imap_pass,
+    )
     rss_reader_inst = RSSReader(
         anthropic_api_key=settings.anthropic_api_key,
         claude_model=settings.claude_model,
@@ -2452,6 +2531,7 @@ async def main_async() -> None:
             log.info("intelligence_only_mode_active")
             asyncio.create_task(_gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
             asyncio.create_task(_trade_today_task())
+            asyncio.create_task(_newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn))
             asyncio.create_task(_axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
             asyncio.create_task(_rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn))
             asyncio.create_task(_scheduled_analysis_task(ta_analyzer, tracker, kalshi, model_override_fn=_model_override_fn))
@@ -2495,7 +2575,10 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
-            trade_today_task  = asyncio.create_task(_trade_today_task())
+            trade_today_task         = asyncio.create_task(_trade_today_task())
+            newsletter_intel_task    = asyncio.create_task(
+                _newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn)
+            )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
@@ -2577,7 +2660,10 @@ async def main_async() -> None:
             gmail_task        = asyncio.create_task(
                 _gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
-            trade_today_task  = asyncio.create_task(_trade_today_task())
+            trade_today_task         = asyncio.create_task(_trade_today_task())
+            newsletter_intel_task    = asyncio.create_task(
+                _newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn)
+            )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
             )
