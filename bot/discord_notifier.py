@@ -1564,22 +1564,32 @@ async def notify_mfd_newsletter_draft(
     )
 
     # ── Message 2: full HTML (chunked) ────────────────────────────────────────
-    # Wrap in code block so Discord doesn't render it
-    html_chunks = _chunk_text(html, 1980)
+    # Wrap in code block so Discord doesn't render it.
+    # Overhead: label (~25) + "```html\n" (8) + "\n```" (4) = ~37 chars → use 1950 for content.
+    html_chunks = _chunk_text(html, 1950)
     for i, chunk in enumerate(html_chunks):
         label = f"**HTML ({i + 1}/{len(html_chunks)}):**\n" if len(html_chunks) > 1 else "**HTML:**\n"
+        msg = label + f"```html\n{chunk}\n```"
+        # Safety: if somehow still too long, truncate the chunk
+        if len(msg) > 1999:
+            chunk = chunk[:1950 - len(label) - 16]
+            msg = label + f"```html\n{chunk}\n```"
         await _send(
             "mfd-newsletter-queue",
-            {"content": label + f"```html\n{chunk}\n```", "username": KAL},
+            {"content": msg, "username": KAL},
         )
 
     # ── Message 3: plain text readable version (chunked) ─────────────────────
-    plain_chunks = _chunk_text(plain_text, 1990)
+    # Label overhead ~30 chars → use 1960 for content.
+    plain_chunks = _chunk_text(plain_text, 1960)
     for i, chunk in enumerate(plain_chunks):
         label = f"**Plain text ({i + 1}/{len(plain_chunks)}):**\n" if len(plain_chunks) > 1 else "**Plain text preview:**\n"
+        msg = label + chunk
+        if len(msg) > 1999:
+            msg = msg[:1999]
         await _send(
             "mfd-newsletter-queue",
-            {"content": label + chunk, "username": KAL},
+            {"content": msg, "username": KAL},
         )
 
 
