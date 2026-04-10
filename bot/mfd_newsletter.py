@@ -3,18 +3,23 @@ mfd_newsletter.py — Daily MFD (Markets For Dummies) newsletter generation.
 
 Runs at 6:05am ET daily after the morning brief and Trade Today.
 
-Content sources (Supabase bot_communications, last 12h):
-  - morning-brief      → channel = morning-brief
-  - the-trade-today    → channel = the-trade-today
-  - breaking news      → channel = breaking  (top 3)
-  - RSS / market intel → channel = market-pulse, message_type = rss_intel (top 5)
+Content sources (Supabase bot_communications, last 24h):
+  - the-trade-today  → verbatim, never paraphrased
+  - morning-brief    → opener + macro context
+  - breaking         → top stories + More Stories pool
+  - market-pulse     → rss_intel items for More Stories pool
+  - market-open/close→ numbers for Before The Bell table
 
-Pipeline:
-  1. Fetch recent content from Supabase
-  2. Claude generates full newsletter HTML + 3 subject lines + preview text
-  3. POST to Beehiiv as draft
-  4. Post draft summary + subjects to #mfd-newsletter-queue on Discord
-  5. Log dispatch to bot_communications (message_type=mfd-newsletter)
+Locked template order (enforced in system prompt):
+  1. Header: MARKETS FOR DUMMIES | Date
+  2. Opener (2-3 sentences, macro mood)
+  3. BEFORE THE BELL (numbers table)
+  4. WHAT'S GOING ON (top 2-3 stories)
+  5. EARNINGS (beat/miss + 1 sentence)
+  6. MORE STORIES (8-12 scannable one-liners)
+  7. THE TRADE TODAY (verbatim + 1 italic line)
+  8. ONE THING TO WATCH
+  9. Sign-off + tagline
 """
 from __future__ import annotations
 
@@ -22,12 +27,11 @@ import asyncio
 import datetime
 import json
 import logging
+import re
 
 import httpx
 
 from config import settings
-
-import re
 
 log = logging.getLogger(__name__)
 
@@ -37,109 +41,152 @@ BEEHIIV_API_BASE = "https://api.beehiiv.com/v2"
 # ── HTML → plain text ─────────────────────────────────────────────────────────
 
 def html_to_plain(html: str) -> str:
-    """
-    Convert the generated newsletter HTML to readable plain text for Discord preview.
-    Strips all tags, normalises whitespace, preserves paragraph breaks.
-    """
-    # Section headers (uppercase text in <p> tags) → add blank line + header
+    """Convert newsletter HTML to readable plain text for Discord preview."""
     text = re.sub(
         r'<p[^>]*style="[^"]*text-transform:\s*uppercase[^"]*"[^>]*>(.*?)</p>',
         lambda m: f"\n\n── {m.group(1).strip().upper()} ──\n",
         html, flags=re.IGNORECASE | re.DOTALL,
     )
-    # <br> and <hr> → newlines
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'<hr[^>]*>', '\n' + '─' * 40 + '\n', text, flags=re.IGNORECASE)
-    # <strong> / <b> → **bold**
     text = re.sub(r'<strong>(.*?)</strong>', r'**\1**', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<b>(.*?)</b>', r'**\1**', text, flags=re.IGNORECASE | re.DOTALL)
-    # <em> / <i> → _italic_
     text = re.sub(r'<em>(.*?)</em>', r'_\1_', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<i>(.*?)</i>', r'_\1_', text, flags=re.IGNORECASE | re.DOTALL)
-    # </p> and </div> → paragraph break
     text = re.sub(r'</p>|</div>', '\n\n', text, flags=re.IGNORECASE)
-    # Strip remaining tags
     text = re.sub(r'<[^>]+>', '', text)
-    # Decode HTML entities
     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>') \
                .replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
-    # Collapse 3+ consecutive newlines to 2
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# ── Claude prompts ─────────────────────────────────────────────────────────────
 
-_NEWSLETTER_SYSTEM = """You are Kal, the AI behind the "Markets For Dummies" daily newsletter.
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
-Voice rules — never break these:
-1. No jargon without an immediate plain-English definition on the same line.
-   Bad:  "The Fed is hawkish."
-   Good: "The Fed signaled it may raise rates — the price banks charge to borrow money."
-2. Every significant number gets a "so what" in parentheses.
-   Bad:  "The S&P 500 fell 0.4%."
-   Good: "The S&P 500 (a basket tracking America's 500 biggest companies) fell 0.4% — that's roughly $200 on a $50,000 portfolio."
-3. Write for someone who reads the news but skips the financial pages.
-4. Short paragraphs — max 3 sentences each. White space is your friend.
-5. One story per section. Don't cram multiple events together.
-6. No weasel words. Don't write "could", "may potentially" — pick a side or skip the claim.
-7. Always answer implicitly: "Why does this affect me?"
+_NEWSLETTER_SYSTEM = """You are generating Markets for Dummies — a daily financial newsletter for Gen Z and young people who want to understand markets but were never taught. You must follow the template EXACTLY. The template is the law — do not add, remove, or rename any sections. Be clear, direct, confident. Never condescending. Never use jargon without plain English follow-up in the same sentence. Short sentences. Mobile-first.
 
-Newsletter structure (use exactly these section headers):
-  THE TRADE TODAY     — what to watch or think about today (from trade_today input)
-  WHAT HAPPENED       — top 2-3 news items in plain English
-  THE NUMBER          — one stat, fully explained with context
-  WHAT TO WATCH       — 1-2 forward-looking items for the next 24-48h
-"""
+VOICE RULES — break these and the output is rejected:
+1. No jargon without immediate plain-English on the same line.
+   Wrong: "The Fed is hawkish."
+   Right: "The Fed signaled it may raise rates — the price banks charge to borrow money."
+2. Every significant number gets a "so what."
+   Wrong: "The S&P 500 fell 0.4%."
+   Right: "The S&P 500 (tracks America's 500 biggest companies) fell 0.4% — that's about $200 on a $50,000 portfolio."
+3. Answer implicitly: "Why does this affect me?"
+4. Short paragraphs. 2-3 sentences max. White space is your friend.
+5. Never write "could", "may potentially" — pick a side or skip the claim.
+6. On macro release days (CPI, PCE, GDP, NFP, FOMC, PPI, Retail Sales): this event MUST be the first story in WHAT'S GOING ON. State what it printed, vs estimate, vs previous, then what it means.
 
-_NEWSLETTER_USER_TMPL = """Today is {date}. Here is the raw content to work from:
+LOCKED TEMPLATE — follow this EXACT order, EXACT section names:
 
-=== THE TRADE TODAY ===
+SECTION 1: Header
+<div style="font-size:11px;font-weight:bold;letter-spacing:0.12em;text-transform:uppercase;color:#888888;margin:0 0 4px;">MARKETS FOR DUMMIES</div>
+<div style="font-size:28px;font-weight:bold;color:#1a1a1a;margin:0 0 8px;">[Date like: Thursday, April 10]</div>
+<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;">
+
+SECTION 2: Opener
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">GOOD MORNING</p>
+2-3 sentence macro mood. No jargon. Tell the reader what kind of day it is for markets.
+
+SECTION 3: BEFORE THE BELL
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">BEFORE THE BELL</p>
+Numbers table — MANDATORY. Use data from the MARKET DATA section of input. Format:
+<table style="width:100%;border-collapse:collapse;font-size:14px;">
+  <tr style="border-bottom:1px solid #e5e7eb;color:#888888;font-size:11px;font-weight:bold;letter-spacing:0.05em;">
+    <td style="padding:6px 0;">INDEX</td><td style="padding:6px 0;text-align:right;">LAST</td><td style="padding:6px 0;text-align:right;">DAY</td><td style="padding:6px 0;text-align:right;">YTD</td>
+  </tr>
+  [S&P 500 row] [Dow row] [Nasdaq row] [Russell 2000 row]
+  <tr><td colspan="4" style="padding:4px 0;border-top:1px solid #e5e7eb;"></td></tr>
+  [Bitcoin row] [Ethereum row] [Solana row]
+  <tr><td colspan="4" style="padding:4px 0;border-top:1px solid #e5e7eb;"></td></tr>
+  [Gold row] [Oil WTI row] [10Y Treasury row]
+</table>
+Row format: <tr><td style="padding:6px 0;">[Name]</td><td style="padding:6px 0;text-align:right;">[price]</td><td style="padding:6px 0;text-align:right;color:[green/red];">[day%]</td><td style="padding:6px 0;text-align:right;color:[green/red];">[ytd% or N/A]</td></tr>
+Green = #00C076, Red = #EF4444. Use N/A if data missing. Never invent numbers.
+One italic context sentence below the table (e.g. "Markets are digesting today's CPI print.").
+
+SECTION 4: WHAT'S GOING ON
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">WHAT'S GOING ON</p>
+Top 2-3 stories. Each story: bold headline, then 2-3 sentence plain-English explanation.
+If today has a macro release (CPI/PCE/GDP/NFP/FOMC/PPI): IT MUST BE STORY #1. State the number, the estimate, the previous, what it means.
+
+SECTION 5: EARNINGS
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">EARNINGS</p>
+Only include if earnings data exists. Beat/miss + 1 plain-English sentence per company. If no earnings data, omit this section entirely.
+
+SECTION 6: MORE STORIES
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">MORE STORIES</p>
+8-12 scannable one-liners from the breaking news and RSS intel provided. NO duplicates with WHAT'S GOING ON.
+Sort by relevance: macro data first → equities → tech/AI → everything else.
+Each line: <p style="margin:0 0 10px;">▸ <strong>[Plain English headline]</strong> — [one plain English sentence of context]</p>
+Never invent stories. Only use items from the provided MORE STORIES POOL.
+
+SECTION 7: THE TRADE TODAY
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">🎯 THE TRADE TODAY</p>
+<div style="background:#f9fafb;border-left:3px solid #F1C40F;padding:14px 18px;margin:16px 0;">
+COPY THE TRADE TODAY TEXT VERBATIM. Do not paraphrase. Do not summarize. Copy it word for word.
+</div>
+One italic plain-English sentence after the box — nothing more. E.g. <em>This is the one number to watch before you open any position today.</em>
+
+SECTION 8: ONE THING TO WATCH
+<p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">ONE THING TO WATCH</p>
+One forward-looking sentence for the next 24-48 hours. Specific event or data point.
+
+SECTION 9: Sign-off
+<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;">
+<p style="margin:0 0 4px;font-weight:bold;">See you tomorrow.</p>
+<p style="margin:0;color:#888888;font-size:14px;">— Markets for Dummies</p>
+<p style="font-size:13px;color:#9ca3af;margin-top:24px;font-style:italic;">Wall Street, translated.</p>
+<p style="font-size:12px;color:#9ca3af;margin-top:16px;">Reply to this email with questions or feedback.</p>"""
+
+
+_NEWSLETTER_USER_TMPL = """Today is {date}. Generate the complete MFD newsletter using ONLY the data provided below.
+
+=== THE TRADE TODAY (COPY VERBATIM — do not change a single word) ===
 {trade_today}
 
-=== MORNING BRIEF ===
+=== MORNING BRIEF (use for opener + WHAT'S GOING ON stories) ===
 {morning_brief}
 
-=== BREAKING NEWS (top items) ===
-{breaking_news}
+=== MARKET DATA (use for BEFORE THE BELL numbers table) ===
+{market_data}
 
-=== RSS / MARKET INTEL ===
-{rss_intel}
+=== BREAKING NEWS — TOP STORIES (use for WHAT'S GOING ON) ===
+{breaking_top}
+
+=== MORE STORIES POOL (pick 8-12 for MORE STORIES section — exclude any already in WHAT'S GOING ON) ===
+{more_stories_pool}
 
 ---
-Generate a complete MFD newsletter for today. Return ONLY valid JSON, no markdown fences, with these exact keys:
+Return ONLY valid JSON — no markdown fences, no commentary. Use these exact keys:
 
 {{
-  "html": "<full HTML newsletter body — inline styles only, Beehiiv-compatible>",
-  "subject_a": "<provocative fact angle — lead with a number or surprising stat, max 60 chars>",
+  "html": "<complete HTML newsletter — outer wrapper + all 9 sections in locked order — inline styles only>",
+  "subject_a": "<provocative fact — lead with a number or surprising stat, max 60 chars>",
   "subject_b": "<contrarian angle — challenge conventional wisdom, max 60 chars>",
-  "subject_c": "<plain event description — what happened, max 60 chars>",
-  "preview_text": "<one-sentence teaser, does not repeat the subject line, max 100 chars>"
+  "subject_c": "<plain event — what happened, max 60 chars>",
+  "preview_text": "<one-sentence teaser, does not repeat subject line, max 100 chars>"
 }}
 
-HTML requirements:
-- Outer wrapper: <div style="max-width:600px;margin:0 auto;padding:0 20px;font-family:Georgia,serif;font-size:16px;line-height:1.7;color:#1a1a1a;">
-- Section headers: <p style="font-size:11px;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase;color:#888888;margin:28px 0 8px;">SECTION NAME</p>
-- Section dividers: <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;">
-- Highlight boxes (for The Trade Today): <div style="background:#f9fafb;border-left:3px solid #F1C40F;padding:14px 18px;margin:16px 0;">
-- Body paragraphs: <p style="margin:0 0 14px;">
-- Bold key terms: <strong>
-- Footer: <p style="font-size:13px;color:#9ca3af;margin-top:36px;border-top:1px solid #e5e7eb;padding-top:16px;">Markets For Dummies — plain English, every trading day. Reply to this email with questions.</p>
+Outer wrapper: <div style="max-width:600px;margin:0 auto;padding:0 20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.7;color:#1a1a1a;">
 
-If a section has no content, omit it entirely (don't write placeholder text).
-"""
+CRITICAL RULES:
+- The Trade Today: copy the text VERBATIM from the === THE TRADE TODAY === section above. Not one word changed.
+- More Stories: use ONLY items from the MORE STORIES POOL. 8 minimum, 12 maximum.
+- Numbers table: use ONLY numbers from the MARKET DATA section. Write N/A for any missing value. Never invent a price.
+- Macro releases (CPI/PCE/GDP/NFP/FOMC/PPI/Retail Sales): if present in any input section, they MUST be Story #1 in WHAT'S GOING ON with the actual print, estimate, previous, and plain-English meaning.
+- Do not add, remove, or rename any sections. Follow the locked template exactly."""
 
-# ── Supabase content fetch ─────────────────────────────────────────────────────
+
+# ── Supabase content fetch ────────────────────────────────────────────────────
 
 async def _fetch_channel(
     channel: str,
-    hours: int = 12,
-    limit: int = 3,
+    hours: int = 24,
+    limit: int = 20,
     message_type: str | None = None,
 ) -> list[str]:
-    """
-    Fetch recent bot_communications entries for a channel.
-    Returns list of content strings (newest first).
-    """
+    """Fetch recent bot_communications entries. Returns list of content strings."""
     try:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return []
@@ -170,58 +217,107 @@ async def _fetch_channel(
 
 
 async def _gather_content() -> dict[str, str]:
-    """Fetch all content sources in parallel. Returns dict keyed for Claude prompt."""
-    trade_today_rows, brief_rows, breaking_rows, rss_rows = await asyncio.gather(
-        _fetch_channel("the-trade-today", hours=12, limit=1),
-        _fetch_channel("morning-brief",   hours=12, limit=1),
-        _fetch_channel("breaking",         hours=12, limit=3),
-        _fetch_channel("market-pulse",     hours=12, limit=5, message_type="rss_intel"),
+    """
+    Fetch all content sources in parallel.
+    Returns dict with keys:
+      trade_today, morning_brief, market_data,
+      breaking_top (top 3 for WHAT'S GOING ON),
+      more_stories_pool (all remaining items for MORE STORIES)
+    """
+    (
+        trade_today_rows,
+        brief_rows,
+        market_open_rows,
+        market_close_rows,
+        market_pulse_rows,
+        breaking_rows,
+        rss_rows,
+    ) = await asyncio.gather(
+        _fetch_channel("the-trade-today", hours=24, limit=1),
+        _fetch_channel("morning-brief",   hours=24, limit=1),
+        _fetch_channel("market-open",     hours=24, limit=1),
+        _fetch_channel("market-close",    hours=24, limit=1),
+        _fetch_channel("market-pulse",    hours=24, limit=1),
+        _fetch_channel("breaking",        hours=24, limit=20),
+        _fetch_channel("market-pulse",    hours=24, limit=20, message_type="rss_intel"),
     )
+
+    # Market data: prefer market-close (has end-of-day), then market-open, then market-pulse
+    market_data_rows = market_close_rows or market_open_rows or market_pulse_rows
+    market_data_text = "\n\n".join(market_data_rows[:1]) if market_data_rows else "(no market data available)"
+
+    # Top 3 breaking news items for WHAT'S GOING ON
+    top_breaking = breaking_rows[:3]
+    breaking_top_text = "\n\n".join(f"• {x}" for x in top_breaking) if top_breaking else "(none today)"
+
+    # More stories pool: remaining breaking items + all RSS intel, deduplicated
+    remaining_breaking = breaking_rows[3:]
+    all_pool_items = remaining_breaking + rss_rows
+    # Deduplicate by first 80 chars
+    seen: set[str] = set()
+    pool_unique: list[str] = []
+    for item in all_pool_items:
+        key = item[:80].lower()
+        if key not in seen:
+            seen.add(key)
+            pool_unique.append(item)
+
+    more_stories_pool_text = (
+        "\n".join(f"• {x[:300]}" for x in pool_unique[:25])
+        if pool_unique
+        else "(no additional stories available)"
+    )
+
     return {
-        "trade_today":   "\n\n".join(trade_today_rows) or "(none today)",
-        "morning_brief": "\n\n".join(brief_rows)       or "(none today)",
-        "breaking_news": "\n\n".join(f"• {x}" for x in breaking_rows) or "(none today)",
-        "rss_intel":     "\n\n".join(f"• {x}" for x in rss_rows)      or "(none today)",
+        "trade_today":        "\n\n".join(trade_today_rows) or "(no Trade Today today)",
+        "morning_brief":      "\n\n".join(brief_rows[:1])   or "(no morning brief today)",
+        "market_data":        market_data_text,
+        "breaking_top":       breaking_top_text,
+        "more_stories_pool":  more_stories_pool_text,
     }
 
 
 def _has_content(sources: dict[str, str]) -> bool:
-    """True if there is at least one real content source to work from."""
-    return any(v != "(none today)" for v in sources.values())
+    """True if at least one meaningful content source exists."""
+    no_content_values = {
+        "(no Trade Today today)", "(no morning brief today)",
+        "(no market data available)", "(none today)",
+        "(no additional stories available)",
+    }
+    return any(v not in no_content_values for v in sources.values())
 
 
-# ── Claude newsletter generation ───────────────────────────────────────────────
+# ── Claude newsletter generation ──────────────────────────────────────────────
 
 async def generate_mfd_newsletter(
     api_key: str,
     model: str = "claude-opus-4-6",
 ) -> dict | None:
     """
-    Generate a full MFD newsletter draft.
-
-    Returns dict: {html, subject_a, subject_b, subject_c, preview_text}
+    Generate a full MFD newsletter draft following the locked 9-section template.
+    Returns dict: {html, subject_a, subject_b, subject_c, preview_text, plain_text}
     Returns None if content is insufficient or Claude fails.
     """
     sources = await _gather_content()
 
     if not _has_content(sources):
-        log.info("[mfd-newsletter] no content in last 12h — skipping")
+        log.info("[mfd-newsletter] no content in last 24h — skipping")
         return None
 
-    # Windows strftime doesn't support %-d; use a small workaround
     today = datetime.date.today()
-    today_str = today.strftime("%B") + " " + str(today.day) + ", " + str(today.year)
+    today_str = today.strftime("%A, %B ") + str(today.day)  # e.g. "Thursday, April 10"
 
     user_prompt = _NEWSLETTER_USER_TMPL.format(
         date=today_str,
-        trade_today=sources["trade_today"][:1500],
-        morning_brief=sources["morning_brief"][:2000],
-        breaking_news=sources["breaking_news"][:1500],
-        rss_intel=sources["rss_intel"][:1000],
+        trade_today=sources["trade_today"][:2000],
+        morning_brief=sources["morning_brief"][:3000],
+        market_data=sources["market_data"][:2000],
+        breaking_top=sources["breaking_top"][:2000],
+        more_stories_pool=sources["more_stories_pool"][:4000],
     )
 
     try:
-        async with httpx.AsyncClient(timeout=90.0) as c:
+        async with httpx.AsyncClient(timeout=120.0) as c:
             r = await c.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -231,7 +327,7 @@ async def generate_mfd_newsletter(
                 },
                 json={
                     "model":      model,
-                    "max_tokens": 4096,
+                    "max_tokens": 8192,
                     "system":     _NEWSLETTER_SYSTEM,
                     "messages":   [{"role": "user", "content": user_prompt}],
                 },
@@ -257,9 +353,7 @@ async def generate_mfd_newsletter(
             log.warning("[mfd-newsletter] missing keys from Claude: %s", missing)
             return None
 
-        # Add plain text version for Discord readability
         result["plain_text"] = html_to_plain(result["html"])
-
         return result
 
     except json.JSONDecodeError as exc:
@@ -270,15 +364,12 @@ async def generate_mfd_newsletter(
         return None
 
 
-# ── Beehiiv API ────────────────────────────────────────────────────────────────
+# ── Beehiiv API (kept for future enterprise upgrade — not called in Discord fallback mode) ──
 
 async def _log_beehiiv_error(status_code: int, body: str, url: str) -> None:
-    """Log a Beehiiv API error to Railway logs and Supabase system-logs."""
     msg = f"[mfd-beehiiv-error] POST {url} → HTTP {status_code}\n{body[:2000]}"
-    # Always print to Railway logs (visible in `railway logs`)
     print(msg, flush=True)
     log.warning(msg)
-    # Also persist to Supabase so it's visible in the dashboard
     try:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return
@@ -289,73 +380,40 @@ async def _log_beehiiv_error(status_code: int, body: str, url: str) -> None:
             "Content-Type":  "application/json",
             "Prefer":        "return=minimal",
         }
-        row = {
-            "channel":         "system-logs",
-            "message_type":    "mfd-beehiiv-error",
-            "content":         msg,
-            "delivery_method": "beehiiv",
-            "status":          "failed",
-        }
         async with httpx.AsyncClient(timeout=10.0) as c:
-            await c.post(supa_url, headers=headers, json=row)
-    except Exception as exc:
-        log.debug("[mfd-newsletter] could not persist beehiiv error to supabase: %s", exc)
+            await c.post(supa_url, headers=headers, json={
+                "channel": "system-logs", "message_type": "mfd-beehiiv-error",
+                "content": msg, "delivery_method": "beehiiv", "status": "failed",
+            })
+    except Exception:
+        pass
 
 
-async def post_to_beehiiv(
-    html: str,
-    subject: str,
-    preview_text: str,
-    api_key: str,
-    publication_id: str,
-) -> str | None:
-    """
-    POST a draft newsletter to Beehiiv V2.
-    Returns the Beehiiv post ID on success, None on failure.
-
-    Beehiiv V2 POST /v2/publications/{publicationId}/posts
-    Required: title
-    Content:  body_content (HTML string) — inline styles only, no <style>/<link> tags
-    """
-    # Beehiiv V2 requires publication ID in format pub_XXXX.
-    # Normalize: add prefix if the env var was set without it.
+async def post_to_beehiiv(html: str, subject: str, preview_text: str,
+                           api_key: str, publication_id: str) -> str | None:
+    """POST a draft newsletter to Beehiiv V2 (enterprise plan required)."""
     if not publication_id.startswith("pub_"):
         publication_id = f"pub_{publication_id}"
     url = f"{BEEHIIV_API_BASE}/publications/{publication_id}/posts"
-    # content_type is not a valid V2 field — omit it to avoid 400 errors.
-    # body_content accepts raw HTML with inline styles.
-    payload = {
-        "title":         subject,
-        "subtitle":      preview_text,
-        "status":        "draft",
-        "body_content":  html,
-    }
+    payload = {"title": subject, "subtitle": preview_text, "status": "draft", "body_content": html}
     try:
         async with httpx.AsyncClient(timeout=30.0) as c:
-            r = await c.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json=payload,
-            )
+            r = await c.post(url, headers={"Authorization": f"Bearer {api_key}",
+                                            "Content-Type": "application/json"}, json=payload)
         if r.status_code in (200, 201):
             data = r.json()
             post_id = data.get("data", {}).get("id") or data.get("id", "unknown")
             log.info("[mfd-newsletter] Beehiiv draft created: %s", post_id)
             return str(post_id)
-        # Capture full error details
         await _log_beehiiv_error(r.status_code, r.text, url)
         return None
     except Exception as exc:
-        err_msg = f"[mfd-beehiiv-error] exception posting to {url}: {exc}"
-        print(err_msg, flush=True)
-        log.warning(err_msg)
+        print(f"[mfd-beehiiv-error] exception: {exc}", flush=True)
+        log.warning("[mfd-beehiiv-error] %s", exc)
         return None
 
 
-# ── Supabase dispatch log ──────────────────────────────────────────────────────
+# ── Supabase dispatch log ─────────────────────────────────────────────────────
 
 async def log_newsletter_dispatch(subject: str, beehiiv_id: str | None) -> None:
     """Log the newsletter draft dispatch to bot_communications."""
@@ -376,8 +434,8 @@ async def log_newsletter_dispatch(subject: str, beehiiv_id: str | None) -> None:
             "channel":         "mfd-published",
             "message_type":    "mfd-newsletter",
             "content":         content,
-            "delivery_method": "beehiiv",
-            "status":          "delivered" if beehiiv_id else "failed",
+            "delivery_method": "discord",
+            "status":          "delivered",
         }
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.post(url, headers=headers, json=body)
