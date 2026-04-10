@@ -1889,6 +1889,106 @@ async def _newsletter_intel_task(
             log.warning("[newsletter-intel] scan cycle failed: %s", exc)
 
 
+# ── MFD newsletter task ────────────────────────────────────────────────────────
+
+async def _mfd_newsletter_task(model_override_fn=None) -> None:
+    """
+    Generate and post the MFD (Markets For Dummies) newsletter draft at 6:05am ET
+    (11:05 UTC) every day. Runs after Trade Today (5:55am) and the morning brief.
+
+    Pipeline each day:
+      1. Fetch last 12h of content from Supabase bot_communications
+      2. Claude generates HTML newsletter + 3 subject lines
+      3. POST to Beehiiv as draft
+      4. Post draft summary to #mfd-newsletter-queue on Discord
+      5. Log dispatch to Supabase
+    """
+    import mfd_newsletter as _mfd
+
+    _TARGET_UTC_HOUR   = 11
+    _TARGET_UTC_MINUTE = 5
+
+    posted_date = ""
+
+    while True:
+        now_utc = datetime.datetime.utcnow()
+        today_str = now_utc.date().isoformat()
+
+        # Reset daily flag at midnight UTC
+        if now_utc.hour == 0 and posted_date != today_str:
+            posted_date = ""
+
+        already_ran = (posted_date == today_str)
+
+        if not already_ran:
+            target_today = now_utc.replace(
+                hour=_TARGET_UTC_HOUR, minute=_TARGET_UTC_MINUTE,
+                second=0, microsecond=0,
+            )
+            secs_until = (target_today - now_utc).total_seconds()
+
+            if secs_until > 0:
+                await asyncio.sleep(min(secs_until, 60))
+                continue
+
+            # It's time — run the pipeline
+            posted_date = today_str
+            try:
+                model_ov = model_override_fn() if model_override_fn else None
+                active_model = model_ov or settings.claude_model
+
+                log.info("[mfd-newsletter] generating daily newsletter")
+                result = await _mfd.generate_mfd_newsletter(
+                    api_key=settings.anthropic_api_key,
+                    model=active_model,
+                )
+
+                if result is None:
+                    log.warning("[mfd-newsletter] generation returned None — no content to post")
+                    await discord.notify_system_log(
+                        "[mfd-newsletter] Skipped today — no source content found in last 12h."
+                    )
+                    await asyncio.sleep(300)
+                    continue
+
+                # POST to Beehiiv
+                beehiiv_id: str | None = None
+                bk = getattr(settings, "beehiiv_api_key", "")
+                bp = getattr(settings, "beehiiv_mfd_publication_id", "")
+                if bk and bp:
+                    beehiiv_id = await _mfd.post_to_beehiiv(
+                        html=result["html"],
+                        subject=result["subject_a"],
+                        preview_text=result["preview_text"],
+                        api_key=bk,
+                        publication_id=bp,
+                    )
+                else:
+                    log.warning("[mfd-newsletter] BEEHIIV_API_KEY or BEEHIIV_MFD_PUBLICATION_ID not set — skipping Beehiiv upload")
+
+                # Post to #mfd-newsletter-queue
+                await discord.notify_mfd_newsletter_draft(
+                    subject_a=result["subject_a"],
+                    subject_b=result["subject_b"],
+                    subject_c=result["subject_c"],
+                    preview_text=result["preview_text"],
+                    beehiiv_id=beehiiv_id,
+                )
+
+                # Log to Supabase
+                await _mfd.log_newsletter_dispatch(
+                    subject=result["subject_a"],
+                    beehiiv_id=beehiiv_id,
+                )
+
+                log.info("[mfd-newsletter] pipeline complete, beehiiv_id=%s", beehiiv_id)
+
+            except Exception as exc:
+                log.warning("[mfd-newsletter] pipeline failed: %s", exc)
+
+        await asyncio.sleep(60)
+
+
 # ── Axios breaking news alerts task ───────────────────────────────────────────
 
 async def _axios_alerts_task(
@@ -2532,6 +2632,7 @@ async def main_async() -> None:
             asyncio.create_task(_gmail_brief_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
             asyncio.create_task(_trade_today_task())
             asyncio.create_task(_newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn))
+            asyncio.create_task(_mfd_newsletter_task(model_override_fn=_model_override_fn))
             asyncio.create_task(_axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn))
             asyncio.create_task(_rss_feed_task(rss_reader_inst, model_override_fn=_model_override_fn))
             asyncio.create_task(_scheduled_analysis_task(ta_analyzer, tracker, kalshi, model_override_fn=_model_override_fn))
@@ -2578,6 +2679,9 @@ async def main_async() -> None:
             trade_today_task         = asyncio.create_task(_trade_today_task())
             newsletter_intel_task    = asyncio.create_task(
                 _newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn)
+            )
+            mfd_newsletter_task      = asyncio.create_task(
+                _mfd_newsletter_task(model_override_fn=_model_override_fn)
             )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)
@@ -2663,6 +2767,9 @@ async def main_async() -> None:
             trade_today_task         = asyncio.create_task(_trade_today_task())
             newsletter_intel_task    = asyncio.create_task(
                 _newsletter_intel_task(newsletter_intel_scanner, model_override_fn=_model_override_fn)
+            )
+            mfd_newsletter_task      = asyncio.create_task(
+                _mfd_newsletter_task(model_override_fn=_model_override_fn)
             )
             axios_alerts_task = asyncio.create_task(
                 _axios_alerts_task(gmail_reader, kalshi, model_override_fn=_model_override_fn)

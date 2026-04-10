@@ -1519,6 +1519,43 @@ async def notify_newsletter_signal(
     )
 
 
+async def notify_mfd_newsletter_draft(
+    subject_a: str,
+    subject_b: str,
+    subject_c: str,
+    preview_text: str,
+    beehiiv_id: str | None,
+) -> None:
+    """
+    Post the MFD newsletter draft to #mfd-newsletter-queue.
+    Includes the 3 subject line options and the Beehiiv draft ID.
+    """
+    status_line = (
+        f"✅ **Beehiiv draft created** — ID: `{beehiiv_id}`"
+        if beehiiv_id
+        else "⚠️ **Beehiiv upload failed** — review HTML manually"
+    )
+    lines = [
+        f"📰 **MFD Newsletter Draft Ready** — {_now_et()}",
+        "",
+        status_line,
+        "",
+        "**Subject line options:**",
+        f"**A** (provocative fact) — {subject_a}",
+        f"**B** (contrarian)      — {subject_b}",
+        f"**C** (plain event)     — {subject_c}",
+        "",
+        f"**Preview text:** _{preview_text}_",
+        "",
+        "_Pick a subject line and send from Beehiiv._",
+    ]
+    await _send(
+        "mfd-newsletter-queue",
+        _embed("\n".join(lines), COLOR_GOLD, footer=f"mfd-newsletter · {_now_et()}"),
+        message_type="mfd-newsletter",
+    )
+
+
 async def notify_idea(idea_text: str) -> None:
     """Post a content opportunity to #content-queue (formerly #ideas)."""
     await _send("content-queue", {"content": idea_text, "username": KAL})

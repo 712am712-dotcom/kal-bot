@@ -1,216 +1,242 @@
 r"""
-diagnose.py -- Comprehensive Kalshi API diagnostic.
+diagnose.py -- Targeted Kalshi market diagnostic with rate-limit-safe delays.
 
-Shows:
-  1. Every open BTC market (all series) with ticker, yes_price, volume, close_time
-  2. Full raw API response for the current BTC 15min market
-  3. ALL volume-related fields and their values (finds the real volume field)
-  4. Top 10 markets by volume across ALL categories
+Probes known series directly instead of paginating all 50k markets.
+The /markets pagination only surfaces sports parlays — political/economic
+markets need direct series_ticker queries.
 
 Usage:
     cd C:\Users\andre\Desktop\kalshi-bot\bot
     python diagnose.py
 """
 import asyncio
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from kalshi_client import KalshiClient
+from main import extract_market_fields
 
 
-def _pp(obj) -> None:
-    print(json.dumps(obj, indent=2, default=str))
+def _vol(m: dict) -> float:
+    fp = m.get("volume_fp")
+    return float(fp) if fp is not None else 0.0
 
 
-def _all_volume_fields(m: dict) -> dict:
-    """Extract every field name that looks remotely volume-related."""
-    vol_keys = {}
-    for k, v in m.items():
-        kl = k.lower()
-        if any(w in kl for w in ("vol", "liquid", "interest", "notional", "size", "amount", "traded", "contract")):
-            vol_keys[k] = v
-    return vol_keys
+def _yes(m: dict) -> float:
+    v = m.get("yes_ask_dollars") or m.get("yes_bid_dollars")
+    return float(v) if v is not None else 0.5
 
 
-def _kal_computed_volume(m: dict) -> float:
-    """What Kal's extract_market_fields() currently computes for volume."""
-    volume_fp = m.get("volume_fp")
-    return float(volume_fp) / 100.0 if volume_fp is not None else 0.0
-
-
-def _yes_price(m: dict) -> float:
-    yes_ask = m.get("yes_ask_dollars")
-    yes_bid = m.get("yes_bid_dollars")
-    if yes_ask is not None:
-        return float(yes_ask)
-    if yes_bid is not None:
-        return float(yes_bid)
-    return 0.5
+async def probe(client: KalshiClient, series: str, limit: int = 10) -> list[dict]:
+    """Fetch open markets for a series, return empty list on any error."""
+    await asyncio.sleep(0.5)   # respect rate limit
+    try:
+        resp = await client._get("/markets", params={
+            "series_ticker": series, "status": "open", "limit": limit
+        })
+        return resp.get("markets", [])
+    except Exception as e:
+        err = str(e)
+        if "429" in err:
+            await asyncio.sleep(3.0)
+            try:
+                resp = await client._get("/markets", params={
+                    "series_ticker": series, "status": "open", "limit": limit
+                })
+                return resp.get("markets", [])
+            except Exception:
+                pass
+        return []
 
 
 async def main() -> None:
     client = KalshiClient()
-    SEP = "=" * 90
+    SEP = "=" * 100
+    all_found: list[dict] = []
 
     try:
-        # ── SECTION 1: All open BTC markets ────────────────────────────────────
+        # ── SECTION 1: Crypto markets ──────────────────────────────────────────
         print(f"\n{SEP}")
-        print("SECTION 1: All open BTC markets (series_ticker=KXBTC15M, KXBTCH, KXBTCD)")
+        print("SECTION 1: Crypto markets — all known series")
         print(SEP)
 
-        btc_series = ["KXBTC15M", "KXBTCH", "KXBTCD", "KXBTC"]
-        all_btc = []
-        for series in btc_series:
-            try:
-                resp = await client._get(
-                    "/markets",
-                    params={"series_ticker": series, "status": "open", "limit": 20},
-                )
-                markets = resp.get("markets", [])
-                if markets:
-                    print(f"\n  Series {series}: {len(markets)} open markets")
-                    all_btc.extend(markets)
-                else:
-                    print(f"\n  Series {series}: 0 open markets")
-            except Exception as e:
-                print(f"\n  Series {series}: ERROR — {e}")
+        CRYPTO_SERIES = [
+            ("KXBTC15M",  "BTC 15min directional"),
+            ("KXBTCH",    "BTC 1hr (does this exist?)"),
+            ("KXBTC1H",   "BTC 1hr alt name"),
+            ("KXBTC4H",   "BTC 4hr"),
+            ("KXBTCW",    "BTC weekly"),
+            ("KXBTCD",    "BTC daily price level"),
+            ("KXBTC",     "BTC today close range"),
+            ("KXETH15M",  "ETH 15min"),
+            ("KXETHD",    "ETH daily"),
+            ("KXSOL15M",  "SOL 15min"),
+            ("KXSOLD",    "SOL daily"),
+        ]
 
-        if all_btc:
-            print(f"\n{'#':<4} {'TICKER':<45} {'YES_PRICE':>10} {'KAL_VOLUME':>12} {'CLOSE_TIME'}")
-            print("-" * 90)
-            for i, m in enumerate(all_btc, 1):
-                ticker     = m.get("ticker", "?")
-                yes_p      = _yes_price(m)
-                kal_vol    = _kal_computed_volume(m)
-                close_time = m.get("close_time", "?")
-                print(f"{i:<4} {ticker:<45} {yes_p:>10.1%} ${kal_vol:>10,.2f}  {close_time}")
-
-        # ── SECTION 2: Full raw API response for first BTC 15min market ────────
-        print(f"\n{SEP}")
-        print("SECTION 2: Full raw API response for the first open KXBTC15M market")
-        print(SEP)
-
-        try:
-            resp = await client._get(
-                "/markets",
-                params={"series_ticker": "KXBTC15M", "status": "open", "limit": 1},
-            )
-            markets_15m = resp.get("markets", [])
-            if markets_15m:
-                first = markets_15m[0]
-                print(f"\nRaw market object for: {first.get('ticker')}")
-                _pp(first)
-
-                # ── SECTION 3: Volume field comparison ───────────────────────────
-                print(f"\n{SEP}")
-                print("SECTION 3: Volume field analysis — what does Kal read vs reality?")
-                print(SEP)
-
-                print("\nAll volume-related fields found in raw API response:")
-                vol_fields = _all_volume_fields(first)
-                if vol_fields:
-                    for k, v in vol_fields.items():
-                        print(f"  {k:<35} = {v!r}")
-                else:
-                    print("  (none found)")
-
-                print(f"\nKal currently reads:  volume_fp = {first.get('volume_fp')!r}")
-                print(f"Kal computed volume:  ${_kal_computed_volume(first):,.2f}")
-
-                # Also check single-market endpoint — sometimes more fields
-                ticker = first.get("ticker", "")
-                if ticker:
-                    print(f"\nFetching single-market endpoint: GET /markets/{ticker}")
-                    try:
-                        single = await client._get(f"/markets/{ticker}")
-                        single_market = single.get("market", single)
-                        print(f"\nSingle-market volume fields:")
-                        vol_fields_single = _all_volume_fields(single_market)
-                        for k, v in vol_fields_single.items():
-                            print(f"  {k:<35} = {v!r}")
-                        print(f"\nFull single-market response:")
-                        _pp(single_market)
-                    except Exception as e:
-                        print(f"ERROR fetching single market: {e}")
+        print(f"\n{'SERIES':<14} {'DESCRIPTION':<30} {'OPEN':>5}  {'BEST VOLUME':>14}  TOP TICKER")
+        print("-" * 100)
+        for series, desc in CRYPTO_SERIES:
+            markets = await probe(client, series, limit=5)
+            if markets:
+                best = max(markets, key=_vol)
+                v = _vol(best)
+                all_found.extend(markets)
+                print(f"{series:<14} {desc:<30} {len(markets):>5}  ${v:>12,.2f}  {best.get('ticker','?')}")
+                if v > 0:
+                    fields = extract_market_fields(best)
+                    print(f"  {'':14} {'volume_fp raw:':30} {str(best.get('volume_fp')):>15}  Kal reads: ${fields['volume']:,.2f}  {'OK' if abs(v - fields['volume']) < 0.01 else 'BUG'}")
             else:
-                print("No open KXBTC15M markets found.")
-        except Exception as e:
-            print(f"ERROR: {e}")
+                print(f"{series:<14} {desc:<30} {0:>5}  (no open markets)")
 
-        # ── SECTION 4: Top 10 markets by volume across ALL categories ──────────
+        # ── SECTION 2: Political / policy markets ─────────────────────────────
         print(f"\n{SEP}")
-        print("SECTION 4: Top 10 markets by volume across ALL categories")
-        print("  (tests multiple volume field names to find which one has real data)")
+        print("SECTION 2: Political / policy markets")
         print(SEP)
 
-        try:
-            resp = await client._get("/markets", params={"status": "open", "limit": 200})
-            all_markets = resp.get("markets", [])
-            print(f"\nFirst page: {len(all_markets)} markets")
+        POLITICAL_SERIES = [
+            ("TRUMPAPPROVE",   "Trump approval rating"),
+            ("KXTRUMP",        "Trump actions/decisions"),
+            ("PRES2028",       "2028 presidential race"),
+            ("KXCONGRESS",     "Congress / legislation"),
+            ("KXPOLITICS",     "Politics (generic)"),
+            ("USPREZWIN",      "US presidential win"),
+            ("KXELECTION",     "Election markets"),
+            ("KXSENATE",       "Senate seats"),
+            ("KXHOUSE",        "House seats"),
+            ("KXTARIFF",       "Tariffs / trade policy"),
+        ]
 
-            # Try every possible volume field
-            candidate_fields = ["volume_fp", "volume", "dollar_volume", "open_interest_fp",
-                                 "open_interest", "liquidity", "notional_value", "total_traded"]
+        print(f"\n{'SERIES':<18} {'DESCRIPTION':<32} {'OPEN':>5}  {'BEST VOLUME':>14}  TOP TICKER")
+        print("-" * 100)
+        for series, desc in POLITICAL_SERIES:
+            markets = await probe(client, series, limit=10)
+            if markets:
+                best = max(markets, key=_vol)
+                v = _vol(best)
+                all_found.extend(markets)
+                print(f"{series:<18} {desc:<32} {len(markets):>5}  ${v:>12,.2f}  {best.get('ticker','?')[:40]}")
+            else:
+                print(f"{series:<18} {desc:<32} {0:>5}  (no open markets)")
 
-            print("\nVolume field presence across first 200 markets:")
-            for field in candidate_fields:
-                present = sum(1 for m in all_markets if m.get(field) is not None and m.get(field) != 0)
-                print(f"  {field:<35}: non-zero in {present:>4}/{len(all_markets)} markets")
+        # ── SECTION 3: Macro / economic markets ───────────────────────────────
+        print(f"\n{SEP}")
+        print("SECTION 3: Macro / economic / financial markets")
+        print(SEP)
 
-            # Find best volume field (most non-zero values)
-            best_field = max(
-                candidate_fields,
-                key=lambda f: sum(1 for m in all_markets if m.get(f) is not None and m.get(f) != 0),
-            )
-            print(f"\nBest volume field: {best_field!r}")
+        MACRO_SERIES = [
+            ("KXFED",          "Fed funds rate"),
+            ("FEDFUNDS",       "Fed funds alt name"),
+            ("KXRATE",         "Interest rates"),
+            ("KXCPI",          "CPI inflation"),
+            ("KXPCE",          "PCE / core inflation"),
+            ("KXGDP",          "GDP growth"),
+            ("KXUNEMP",        "Unemployment rate"),
+            ("KXJOBS",         "Nonfarm payrolls"),
+            ("KXGOLD",         "Gold price"),
+            ("KXOIL",          "Oil / WTI"),
+            ("KXDXY",          "US Dollar index"),
+            ("KXVIX",          "VIX volatility"),
+            ("INXD",           "S&P 500 daily"),
+            ("INXU",           "S&P 500 up/down"),
+            ("KXINX",          "S&P 500 variants"),
+            ("KXNAS",          "Nasdaq"),
+            ("KXSPX",          "SPX variants"),
+            ("KXEARNINGS",     "Earnings results"),
+            ("KXRECESSION",    "Recession probability"),
+            ("KXDEBT",         "Debt ceiling / deficit"),
+        ]
 
-            # Sort by best field and show top 10
-            def _vol_by_field(m: dict, field: str) -> float:
-                v = m.get(field)
-                if v is None:
-                    return 0.0
-                v = float(v)
-                # volume_fp and open_interest_fp are fixed-point (divide by 100)
-                if "_fp" in field:
-                    v /= 100.0
-                return v
+        print(f"\n{'SERIES':<18} {'DESCRIPTION':<32} {'OPEN':>5}  {'BEST VOLUME':>14}  TOP TICKER")
+        print("-" * 100)
+        for series, desc in MACRO_SERIES:
+            markets = await probe(client, series, limit=10)
+            if markets:
+                best = max(markets, key=_vol)
+                v = _vol(best)
+                all_found.extend(markets)
+                print(f"{series:<18} {desc:<32} {len(markets):>5}  ${v:>12,.2f}  {best.get('ticker','?')[:40]}")
+            else:
+                print(f"{series:<18} {desc:<32} {0:>5}  (no open markets)")
 
-            all_markets_sorted = sorted(
-                all_markets,
-                key=lambda m: _vol_by_field(m, best_field),
-                reverse=True,
-            )
+        # ── SECTION 4: Sample from pagination to find what IS out there ────────
+        print(f"\n{SEP}")
+        print("SECTION 4: One page (200 markets) from API — show ALL non-zero volume and their categories")
+        print(SEP)
 
-            print(f"\nTop 10 markets by {best_field}:")
-            print(f"{'#':<4} {'TICKER':<40} {'VOLUME':>12}  {'CATEGORY':<20} TITLE")
-            print("-" * 100)
-            for i, m in enumerate(all_markets_sorted[:10], 1):
-                ticker   = (m.get("ticker") or "?")[:39]
-                vol      = _vol_by_field(m, best_field)
-                category = (m.get("category") or "?")[:19]
-                title    = (m.get("title") or m.get("subtitle") or "?")[:40]
-                print(f"{i:<4} {ticker:<40} ${vol:>10,.0f}  {category:<20} {title}")
+        await asyncio.sleep(1.0)
+        resp = await client._get("/markets", params={"status": "open", "limit": 200})
+        page_markets = resp.get("markets", [])
+        nonzero = [(m, _vol(m)) for m in page_markets if _vol(m) > 50]
+        nonzero.sort(key=lambda x: x[1], reverse=True)
 
-            # Also show Kal's current computed volume for comparison
-            print(f"\nFor comparison — Kal's current volume (volume_fp / 100):")
-            all_markets_sorted_kal = sorted(
-                all_markets,
-                key=lambda m: _kal_computed_volume(m),
-                reverse=True,
-            )
-            print(f"{'#':<4} {'TICKER':<40} {'KAL_VOLUME':>12}  {'REAL_VOL':>12}")
-            print("-" * 75)
-            for i, m in enumerate(all_markets_sorted_kal[:10], 1):
-                ticker  = (m.get("ticker") or "?")[:39]
-                kal_vol = _kal_computed_volume(m)
-                real_vol = _vol_by_field(m, best_field)
-                print(f"{i:<4} {ticker:<40} ${kal_vol:>10,.0f}  ${real_vol:>10,.0f}")
+        print(f"\nMarkets with volume > $50 in first page ({len(page_markets)} total):")
+        print(f"{'VOLUME':>12}  {'YES%':>6}  {'CAT':<20}  {'TICKER'}")
+        print("-" * 80)
+        for m, v in nonzero[:30]:
+            cat = (m.get("category") or "none").strip() or "none"
+            print(f"${v:>10,.2f}  {_yes(m):>5.1%}  {cat:<20}  {m.get('ticker','?')[:50]}")
+        if not nonzero:
+            print("  (none — first page is all $0 parlays)")
 
-        except Exception as e:
-            print(f"ERROR fetching all markets: {e}")
+        # ── SECTION 5: Grand summary — all found markets with real volume ───────
+        print(f"\n{SEP}")
+        print("SECTION 5: GRAND SUMMARY — all markets found via targeted queries, volume > $100")
+        print(SEP)
+
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for m in all_found:
+            t = m.get("ticker", "")
+            if t and t not in seen:
+                seen.add(t)
+                unique.append(m)
+
+        tradeable = [m for m in unique if _vol(m) >= 100]
+        tradeable.sort(key=_vol, reverse=True)
+
+        if tradeable:
+            print(f"\n{len(tradeable)} markets with volume >= $100:\n")
+            print(f"{'#':<4} {'VOLUME':>12}  {'YES%':>6}  {'MINS LEFT':>10}  {'TICKER':<45}  TITLE")
+            print("-" * 110)
+            import datetime as _dt
+            now = _dt.datetime.now(_dt.timezone.utc)
+            for i, m in enumerate(tradeable, 1):
+                t    = (m.get("ticker") or "?")[:44]
+                v    = _vol(m)
+                yp   = _yes(m)
+                ct   = m.get("close_time", "")
+                mins = "?"
+                if ct:
+                    try:
+                        close_dt = _dt.datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                        mins = f"{(close_dt - now).total_seconds() / 60:.0f}"
+                    except Exception:
+                        pass
+                title = (m.get("title") or m.get("subtitle") or "?")[:35]
+                print(f"{i:<4} ${v:>10,.2f}  {yp:>5.1%}  {mins:>9}m  {t:<45}  {title}")
+        else:
+            print("\n  No markets with volume >= $100 found via targeted series queries.")
+            print("  Real high-volume markets may use different series names.")
+            print("  Check the Kalshi API docs or web UI for correct series tickers.")
+
+        # ── SECTION 6: Volume bug check ────────────────────────────────────────
+        print(f"\n{SEP}")
+        print("SECTION 6: Volume bug check — Kal's computed volume vs raw volume_fp")
+        print(SEP)
+
+        check_markets = [m for m in unique if _vol(m) > 0][:8]
+        print(f"\n{'TICKER':<45}  {'RAW volume_fp':>18}  {'Kal reads':>13}  STATUS")
+        print("-" * 90)
+        for m in check_markets:
+            ticker   = (m.get("ticker") or "?")[:44]
+            raw_fp   = str(m.get("volume_fp", "MISSING"))
+            raw_val  = _vol(m)
+            kal_val  = extract_market_fields(m)["volume"]
+            status   = "OK - FIXED" if abs(raw_val - kal_val) < 0.01 else f"BUG: got ${kal_val:,.2f}"
+            print(f"{ticker:<45}  {raw_fp:>18}  ${kal_val:>11,.2f}  {status}")
 
     finally:
         await client.close()

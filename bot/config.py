@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     storyforge_url:    str = Field(default="", description="Storyforge base URL — e.g. https://app.storyforge.io")
     storyforge_api_key: str = Field(default="", description="Storyforge API key for /api/v2/generate")
 
+    # ── Beehiiv (MFD newsletter) ──────────────────────────────────────────────
+    beehiiv_api_key:              str = Field(default="", description="Beehiiv API key — app.beehiiv.com → Settings → API")
+    beehiiv_mfd_publication_id:   str = Field(default="", description="Beehiiv publication ID for Markets For Dummies")
+
     # ── Trading Pause ─────────────────────────────────────────────────────────
     trading_paused: bool = Field(default=False, description="When true: skip all market scanning. Intelligence pipeline (RSS, brief, attention, patterns) keeps running.")
 
