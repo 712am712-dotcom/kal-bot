@@ -1539,12 +1539,11 @@ async def notify_mfd_newsletter_draft(
     """
     Post the MFD newsletter draft to #mfd-newsletter-queue.
 
-    Three messages in sequence:
-      1. Header embed — subject lines A/B/C, preview text, instructions
-      2. Full HTML source (code block, chunked to 1990 chars each)
-      3. Plain-text readable version (chunked to 1990 chars each)
+    One header embed (subjects A/B/C, preview, HTML size note) followed by
+    the plain-text readable version chunked into messages. HTML is NOT posted
+    to Discord — it's too long and unreadable; the size is noted instead.
     """
-    # ── Message 1: header with subjects + instructions ────────────────────────
+    # ── Message 1: header embed with subjects + instructions ─────────────────
     header_lines = [
         f"📰 **MFD Newsletter Draft Ready** — {_now_et()}",
         "",
@@ -1555,7 +1554,9 @@ async def notify_mfd_newsletter_draft(
         "",
         f"**Preview text:** _{preview_text}_",
         "",
-        "**To send:** Copy HTML below → paste into Beehiiv new post → select subject line → send",
+        f"📋 HTML ready — {len(html):,} chars — DM to copy",
+        "",
+        "**To send:** Paste HTML into Beehiiv → pick subject line → send",
     ]
     await _send(
         "mfd-newsletter-queue",
@@ -1563,27 +1564,14 @@ async def notify_mfd_newsletter_draft(
         message_type="mfd-newsletter",
     )
 
-    # ── Message 2: full HTML (chunked) ────────────────────────────────────────
-    # Wrap in code block so Discord doesn't render it.
-    # Overhead: label (~25) + "```html\n" (8) + "\n```" (4) = ~37 chars → use 1950 for content.
-    html_chunks = _chunk_text(html, 1950)
-    for i, chunk in enumerate(html_chunks):
-        label = f"**HTML ({i + 1}/{len(html_chunks)}):**\n" if len(html_chunks) > 1 else "**HTML:**\n"
-        msg = label + f"```html\n{chunk}\n```"
-        # Safety: if somehow still too long, truncate the chunk
-        if len(msg) > 1999:
-            chunk = chunk[:1950 - len(label) - 16]
-            msg = label + f"```html\n{chunk}\n```"
-        await _send(
-            "mfd-newsletter-queue",
-            {"content": msg, "username": KAL},
-        )
-
-    # ── Message 3: plain text readable version (chunked) ─────────────────────
-    # Label overhead ~30 chars → use 1960 for content.
+    # ── Messages 2+: plain text readable version (chunked) ───────────────────
     plain_chunks = _chunk_text(plain_text, 1960)
     for i, chunk in enumerate(plain_chunks):
-        label = f"**Plain text ({i + 1}/{len(plain_chunks)}):**\n" if len(plain_chunks) > 1 else "**Plain text preview:**\n"
+        label = (
+            f"**Preview ({i + 1}/{len(plain_chunks)}):**\n"
+            if len(plain_chunks) > 1
+            else "**Preview:**\n"
+        )
         msg = label + chunk
         if len(msg) > 1999:
             msg = msg[:1999]
@@ -1608,8 +1596,8 @@ def _chunk_text(text: str, max_len: int) -> list[str]:
 
 
 async def notify_idea(idea_text: str) -> None:
-    """Post a content opportunity to #content-queue (formerly #ideas)."""
-    await _send("content-queue", {"content": idea_text, "username": KAL})
+    """Post a content opportunity to #ae-content-queue."""
+    await _send("ae-content-queue", {"content": idea_text, "username": KAL})
 
 
 # ── New intelligence channel notifications ────────────────────────────────────
@@ -1631,7 +1619,7 @@ async def notify_attention_signal(
         f"**Signal score:** {score}/10",
         f"**Sources:** {source_str}",
     ]
-    await _send("attention", {"content": "\n".join(lines), "username": KAL})
+    await _send("ae-attention", {"content": "\n".join(lines), "username": KAL})
 
 
 async def notify_pattern_report(

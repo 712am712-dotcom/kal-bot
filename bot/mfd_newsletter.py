@@ -148,7 +148,7 @@ _NEWSLETTER_USER_TMPL = """Today is {date}. Generate the complete MFD newsletter
 === MORNING BRIEF (use for opener + WHAT'S GOING ON stories) ===
 {morning_brief}
 
-=== MARKET DATA (use for BEFORE THE BELL numbers table) ===
+=== MARKET DATA ({market_data_label}) ===
 {market_data}
 
 === BREAKING NEWS — TOP STORIES (use for WHAT'S GOING ON) ===
@@ -220,10 +220,15 @@ async def _gather_content() -> dict[str, str]:
     """
     Fetch all content sources in parallel.
     Returns dict with keys:
-      trade_today, morning_brief, market_data,
+      trade_today, morning_brief, market_data, market_data_label,
       breaking_top (top 3 for WHAT'S GOING ON),
       more_stories_pool (all remaining items for MORE STORIES)
     """
+    # On weekends, look back 72h so we pick up Friday's market-close data.
+    today = datetime.date.today()
+    is_weekend = today.weekday() >= 5  # 5=Saturday, 6=Sunday
+    market_lookback_hours = 72 if is_weekend else 24
+
     (
         trade_today_rows,
         brief_rows,
@@ -233,18 +238,28 @@ async def _gather_content() -> dict[str, str]:
         breaking_rows,
         rss_rows,
     ) = await asyncio.gather(
-        _fetch_channel("the-trade-today", hours=24, limit=1),
-        _fetch_channel("morning-brief",   hours=24, limit=1),
-        _fetch_channel("market-open",     hours=24, limit=1),
-        _fetch_channel("market-close",    hours=24, limit=1),
-        _fetch_channel("market-pulse",    hours=24, limit=1),
-        _fetch_channel("breaking",        hours=24, limit=20),
+        _fetch_channel("the-trade-today", hours=24,                   limit=1),
+        _fetch_channel("morning-brief",   hours=24,                   limit=1),
+        _fetch_channel("market-open",     hours=market_lookback_hours, limit=1),
+        _fetch_channel("market-close",    hours=market_lookback_hours, limit=1),
+        _fetch_channel("market-pulse",    hours=market_lookback_hours, limit=1),
+        _fetch_channel("breaking",        hours=24,                   limit=20),
         _fetch_channel("market-pulse",    hours=24, limit=20, message_type="rss_intel"),
     )
 
     # Market data: prefer market-close (has end-of-day), then market-open, then market-pulse
     market_data_rows = market_close_rows or market_open_rows or market_pulse_rows
     market_data_text = "\n\n".join(market_data_rows[:1]) if market_data_rows else "(no market data available)"
+
+    # Compute the label for the numbers table header (weekends → last Friday's close)
+    if is_weekend:
+        days_since_friday = (today.weekday() - 4) % 7  # Saturday=1, Sunday=2
+        last_friday = today - datetime.timedelta(days=days_since_friday)
+        market_data_label = (
+            f"As of {last_friday.strftime('%A, %B')} {last_friday.day} market close"
+        )
+    else:
+        market_data_label = "As of today's market data"
 
     # Top 3 breaking news items for WHAT'S GOING ON
     top_breaking = breaking_rows[:3]
@@ -272,6 +287,7 @@ async def _gather_content() -> dict[str, str]:
         "trade_today":        "\n\n".join(trade_today_rows) or "(no Trade Today today)",
         "morning_brief":      "\n\n".join(brief_rows[:1])   or "(no morning brief today)",
         "market_data":        market_data_text,
+        "market_data_label":  market_data_label,
         "breaking_top":       breaking_top_text,
         "more_stories_pool":  more_stories_pool_text,
     }
@@ -312,6 +328,7 @@ async def generate_mfd_newsletter(
         trade_today=sources["trade_today"][:2000],
         morning_brief=sources["morning_brief"][:3000],
         market_data=sources["market_data"][:2000],
+        market_data_label=sources["market_data_label"],
         breaking_top=sources["breaking_top"][:2000],
         more_stories_pool=sources["more_stories_pool"][:4000],
     )
@@ -416,20 +433,36 @@ async def post_to_beehiiv(html: str, subject: str, preview_text: str,
 # ── Supabase dispatch log ─────────────────────────────────────────────────────
 
 async def log_newsletter_dispatch(subject: str, beehiiv_id: str | None) -> None:
-    """Log the newsletter draft dispatch to bot_communications."""
+    """Log the newsletter draft dispatch to bot_communications. Skips if already logged today."""
     try:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return
+        headers_base = {
+            "apikey":        settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        }
+        # Dedup check: has an mfd-newsletter entry already been logged today?
+        today_start = datetime.datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat() + "Z"
+        check_url = (
+            f"{settings.supabase_url}/rest/v1/bot_communications"
+            f"?channel=eq.mfd-published"
+            f"&message_type=eq.mfd-newsletter"
+            f"&timestamp=gte.{today_start}"
+            f"&limit=1"
+        )
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            chk = await c.get(check_url, headers=headers_base)
+        if chk.status_code == 200 and chk.json():
+            log.info("[mfd-newsletter] dispatch already logged today — skipping duplicate")
+            return
+
         content = f"MFD Newsletter draft — subject: {subject}"
         if beehiiv_id:
             content += f" | beehiiv_id: {beehiiv_id}"
         url = f"{settings.supabase_url}/rest/v1/bot_communications"
-        headers = {
-            "apikey":        settings.supabase_service_role_key,
-            "Authorization": f"Bearer {settings.supabase_service_role_key}",
-            "Content-Type":  "application/json",
-            "Prefer":        "return=minimal",
-        }
+        headers = {**headers_base, "Content-Type": "application/json", "Prefer": "return=minimal"}
         body = {
             "channel":         "mfd-published",
             "message_type":    "mfd-newsletter",
