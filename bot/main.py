@@ -2609,6 +2609,7 @@ async def main_async() -> None:
     news_intel       = NewsIntelligence(kalshi)
     attention_engine = AttentionEngine(
         api_key=settings.anthropic_api_key,
+        db=db,
         haiku_model=settings.claude_fallback_model,
     )
     _bot_token = getattr(settings, "discord_bot_token", "")

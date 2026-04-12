@@ -38,7 +38,9 @@ import asyncio
 import datetime
 import json
 import logging
+import re
 import time
+from typing import Any
 from pathlib import Path
 
 import httpx
@@ -745,6 +747,51 @@ def _deduplicate_signals(topics: list[dict]) -> list[dict]:
     return kept
 
 
+# ── Content Engine integration ────────────────────────────────────────────────
+
+def _signal_to_ae_content(signal: dict) -> dict:
+    """
+    Map a validated attention signal to the content dict expected by
+    the ae-signal Remotion composition.
+
+      hook    — winning hook line (≤12 words)
+      points  — 3 key points drawn from slides 2-4
+      takeaway — implication from slide 5, capped at 120 chars
+      cta     — fixed CTA
+    """
+    def _clean(slide: str) -> str:
+        """Strip 'Slide N: ' prefix Haiku adds to slide instructions."""
+        return re.sub(r"^Slide\s+\d+:\s*", "", slide or "").strip()
+
+    hook   = signal["hook"]
+    slides = signal.get("slides") or []
+
+    # Slides 2-4 (0-indexed 1,2,3) hold the key signal points for all formats.
+    # For format D these are community-proof examples; for A/B/C they are insights.
+    raw = [slides[i] if i < len(slides) else "" for i in (1, 2, 3)]
+    points = [_clean(p) for p in raw if p]
+    while len(points) < 3:
+        points.append(hook)
+
+    # Slide 5 (0-indexed 4) = implication / takeaway
+    if len(slides) > 4 and slides[4]:
+        takeaway = _clean(slides[4])[:120]
+    else:
+        _angle_fallback = {
+            "perspective_shift": "The shift is already here.",
+            "economic_impact":   "The economic impact is real.",
+            "conflict":          "The conflict is just beginning.",
+        }
+        takeaway = _angle_fallback.get(signal.get("angle", ""), hook)
+
+    return {
+        "hook":     hook,
+        "points":   points[:3],
+        "takeaway": takeaway,
+        "cta":      "Follow @artificialeducation",
+    }
+
+
 # ── Main engine ───────────────────────────────────────────────────────────────
 
 class AttentionEngine:
@@ -753,9 +800,10 @@ class AttentionEngine:
     Instantiated once in main_async() and driven by _attention_task().
     """
 
-    def __init__(self, api_key: str, haiku_model: str = "claude-haiku-4-5-20251001") -> None:
+    def __init__(self, api_key: str, db: "Any", haiku_model: str = "claude-haiku-4-5-20251001") -> None:
         self._api_key = api_key
         self._model   = haiku_model
+        self._db      = db
 
     async def run_attention_check(self) -> None:
         """
@@ -856,6 +904,17 @@ class AttentionEngine:
             if fmt == "D" and _slot_d_used:
                 log.debug("[attention] format D slot full — trying next")
                 continue
+
+            # ── Queue content job in Supabase ─────────────────────────────────
+            try:
+                job_content = _signal_to_ae_content(signal)
+                await self._db.queue_content_job(
+                    brand="ae",
+                    template="ae-signal",
+                    content=job_content,
+                )
+            except Exception as exc:
+                log.warning("[attention] content_job_queue_failed: %s", exc)
 
             # ── Post to #attention and #content-queue ─────────────────────────
             await discord.notify_attention_signal(

@@ -211,3 +211,27 @@ class DBLogger:
     async def save_strategy_report(self, report: dict) -> str:
         resp = self._client.table("strategy_report").insert(report).execute()
         return resp.data[0]["id"] if resp.data else ""
+
+    # ── Content Jobs ──────────────────────────────────────────────────────────
+
+    async def queue_content_job(
+        self,
+        brand: str,
+        template: str,
+        content: dict,
+        renderer: str = "remotion",
+        format: str = "vertical_30s",
+    ) -> str:
+        """Insert a row into content_jobs with status=pending. Returns the new row id."""
+        row = {
+            "brand":    brand,
+            "renderer": renderer,
+            "template": template,
+            "content":  content,
+            "format":   format,
+            "status":   "pending",
+        }
+        resp = self._client.table("content_jobs").insert(row).execute()
+        row_id = resp.data[0]["id"] if resp.data else ""
+        log.info("content_job_queued id=%s brand=%s template=%s", row_id, brand, template)
+        return row_id
