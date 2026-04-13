@@ -64,9 +64,6 @@ _CHANNEL_ALIAS: dict[str, str] = {
     "trade-history":     "system-logs",
 }
 
-# Module-level bot instance — set by send_channel_guide() after startup.
-# When set, _send() routes through the bot API (channel IDs) instead of webhooks.
-_bot: "DiscordBot | None" = None
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 COLOR_GREEN  = 0x00C076
@@ -173,14 +170,7 @@ async def _discord_raw(channel: str, payload: dict) -> None:
     # ── Inject market status / holiday note for financial channels ────────────
     payload = await _inject_market_note(channel, payload)
 
-    # ── 1. Bot API ────────────────────────────────────────────────────────────
-    if _bot is not None:
-        ch_id = _bot.channel_id(channel)
-        if ch_id:
-            await _bot.send(ch_id, payload)
-            return
-
-    # ── 2 & 3. Webhook ────────────────────────────────────────────────────────
+    # ── Webhook ───────────────────────────────────────────────────────────────
     url = _get_webhook(channel)
     if not url:
         return
@@ -1754,10 +1744,6 @@ async def send_channel_guide() -> None:
     When bot token is absent, falls back to posting guide cards via webhooks
     (no pinning, no channel creation).
     """
-    global _bot
-
-    token = getattr(settings, "discord_bot_token", "")
-
     # Full guide map — new 6-section structure
     guides = {
         # 📡 KAL HQ
@@ -1785,27 +1771,5 @@ async def send_channel_guide() -> None:
         # 📦 ARCHIVE — no guides needed
     }
 
-    if token:
-        from discord_bot import DiscordBot, make_kal_avatar
-        bot = DiscordBot(token)
-
-        # Update bot profile
-        try:
-            avatar = make_kal_avatar()
-            await bot.update_profile("Kal", avatar)
-        except Exception as exc:
-            log.warning("[discord] profile update failed: %s", exc)
-
-        # Create channels + categories, pin guides
-        try:
-            await bot.setup(guides)
-            _bot = bot
-            log.info("[discord] channel setup complete — routing through bot API")
-        except Exception as exc:
-            log.warning("[discord] channel setup failed: %s", exc)
-
-    else:
-        # No bot token — send guide cards via webhooks only (no pinning)
-        log.warning("[discord] DISCORD_BOT_TOKEN not set — sending guides via webhook (no pinning)")
-        for ch_name, guide_text in guides.items():
-            await _send(ch_name, {"content": guide_text, "username": KAL})
+    # Bot token path removed — Discord bot is deprecated.
+    # Guide cards are no longer sent at startup.
