@@ -1,4 +1,5 @@
 anthropic==0.40.0
+aiohttp>=3.9.0
 httpx==0.27.2
 supabase>=2.10.0
 python-dotenv==1.0.1

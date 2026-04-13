@@ -2556,9 +2556,36 @@ async def _market_close_task(model_override_fn=None) -> None:
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
+async def _run_health_server() -> None:
+    """Lightweight aiohttp health server — runs concurrently with the worker loop."""
+    from aiohttp import web as _web
+
+    async def health(_req: _web.Request) -> _web.Response:
+        import json as _json
+        return _web.Response(
+            text=_json.dumps({"status": "ok", "service": "kal"}),
+            content_type="application/json",
+        )
+
+    app = _web.Application()
+    app.router.add_get("/health", health)
+    runner = _web.AppRunner(app)
+    await runner.setup()
+    port = int(__import__("os").environ.get("PORT", 8000))
+    site = _web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info("health_server_started", port=port)
+    # Keep running forever alongside the worker
+    while True:
+        await asyncio.sleep(3600)
+
+
 async def main_async() -> None:
     import os
     from pathlib import Path as _Path
+
+    # Start health server concurrently — does not block the worker loop
+    asyncio.create_task(_run_health_server())
 
     if getattr(settings, "trading_paused", False):
         mode = "intelligence"
