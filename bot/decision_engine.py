@@ -4,7 +4,7 @@ MarketAnalysis and decides whether to place a trade.
 """
 import structlog
 
-import discord_notifier as discord
+import supabase_logger as discord
 from claude_client import MarketAnalysis
 from config import settings
 

@@ -114,7 +114,7 @@ async def main() -> None:
     # ── 4. Discord test messages ─────────────────────────────────
     print(f"\n[4/4] DISCORD CHANNEL TEST\n")
 
-    import discord_notifier as discord
+    import supabase_logger as discord
 
     # Check if we have any Discord config at all
     has_bot     = bool(settings.discord_bot_token)

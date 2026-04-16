@@ -20,4 +20,4 @@ google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
 google-api-python-client>=2.0.0
 # Vector memory — searchable pattern library (numpy-only embedding, no torch)
-pinecone-client>=3.0.0
+pinecone>=3.0.0

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -v -X POST https://blissful-youthfulness-production-a276.up.railway.app/api/render -H 'Content-Type: application/json' -d '{\"brand\":\"mfd\",\"renderer\":\"remotion\",\"template\":\"trade-today\",\"content\":{\"hook\":\"Oil dropped 10%\",\"points\":[\"Point 1\",\"Point 2\",\"Point 3\"],\"cta\":\"Get the full brief free\",\"url\":\"marketsfordummies.com\"},\"format\":\"vertical_30s\"}')",
+      "Bash(git -C /c/Users/andre/Desktop/content-engine rev-parse HEAD)",
+      "Bash(npm pack:*)",
+      "Bash(node -e \"const r = require\\('./node_modules/@remotion/renderer'\\); console.log\\(Object.keys\\(r\\).filter\\(k => k.includes\\('render'\\) || k.includes\\('Ffmpeg'\\) || k.includes\\('ffmpeg'\\)\\)\\)\")",
+      "Bash(npm install:*)",
+      "Bash(node -e \"const r = require\\('/tmp/remotion-v3-check/node_modules/@remotion/renderer'\\); console.log\\(Object.keys\\(r\\).filter\\(k => k.includes\\('render'\\) || k.includes\\('Ffmpeg'\\) || k.includes\\('ffmpeg'\\) || k.includes\\('select'\\) || k.includes\\('bundle'\\)\\)\\)\")",
+      "Bash(curl -sL \"https://registry.npmjs.org/@remotion/renderer/-/renderer-3.3.103.tgz\")",
+      "Bash(tar xz:*)",
+      "Bash(mkdir remotion-main-v3:*)",
+      "Bash(curl -sL \"https://registry.npmjs.org/remotion/-/remotion-3.3.103.tgz\")",
+      "Bash(xargs grep:*)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['version']\\)\")",
+      "Bash(npm run:*)",
+      "Bash(curl -sf \"https://blissful-youthfulness-production-a276.up.railway.app/api/render/7b4cc4d2-f2c3-4645-aab2-ac0abf7d2c05\" -H \"x-api-key: ce_live_8836aaa46834106ca59064e5ccb787c7\")",
+      "Bash(curl -s -X POST https://blissful-youthfulness-production-a276.up.railway.app/api/render -H 'Content-Type: application/json' -d '{\"template\":\"trade-today\",\"content\":{\"hook\":\"Oil dropped 10%. Here is why that is wrong.\",\"points\":[\"Iran re-closed the Strait within hours\",\"Infrastructure damage takes months to fix\",\"Defense stocks win either way\"],\"cta\":\"Get the full brief free\",\"url\":\"marketsfordummies.com\"}}')",
+      "Bash(curl -s -X POST https://blissful-youthfulness-production-a276.up.railway.app/api/render -H 'Content-Type: application/json' -H 'x-api-key: ce_live_8836aaa46834106ca59064e5' -d '{\"template\":\"trade-today\",\"content\":{\"hook\":\"Oil dropped 10%. Here is why that is wrong.\",\"points\":[\"Iran re-closed the Strait within hours\",\"Infrastructure damage takes months to fix\",\"Defense stocks win either way\"],\"cta\":\"Get the full brief free\",\"url\":\"marketsfordummies.com\"}}')",
+      "Bash(curl -s -X POST https://blissful-youthfulness-production-a276.up.railway.app/api/render -H 'Content-Type: application/json' -H 'x-api-key: ce_live_8836aaa46834106ca59064e5ccb787c7' -d '{\"template\":\"trade-today\",\"content\":{\"hook\":\"Oil dropped 10%. Here is why that is wrong.\",\"points\":[\"Iran re-closed the Strait within hours\",\"Infrastructure damage takes months to fix\",\"Defense stocks win either way\"],\"cta\":\"Get the full brief free\",\"url\":\"marketsfordummies.com\"}}')"
+    ]
+  }
+}

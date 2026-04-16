@@ -32,7 +32,7 @@ from claude_client import ClaudeClient
 from config import settings
 from db_logger import DBLogger
 from decision_engine import DecisionEngine
-import discord_notifier as discord
+import supabase_logger as discord
 from kalshi_client import KalshiClient
 from market_intelligence import IntelligenceScanner
 from news_intelligence import NewsIntelligence

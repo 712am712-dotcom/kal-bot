@@ -23,7 +23,7 @@ import datetime
 
 import structlog
 
-import discord_notifier as discord
+import supabase_logger as discord
 
 log = structlog.get_logger(__name__)
 

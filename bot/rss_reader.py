@@ -512,7 +512,7 @@ Routing rules:
         eval_result: dict,
     ) -> None:
         """Route evaluated article to the appropriate Discord channel."""
-        import discord_notifier as discord
+        import supabase_logger as discord
 
         headline     = (eval_result.get("headline") or article.get("title", "")).strip()
         source       = article.get("source", "")

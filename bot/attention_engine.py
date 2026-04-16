@@ -868,7 +868,7 @@ class AttentionEngine:
         candidates = _deduplicate_signals(filtered)
 
         # ── Step 5: iterate candidates, validate, fill first open slot ────────
-        import discord_notifier as discord
+        import supabase_logger as discord
 
         for top in candidates:
             score   = top["score"]
@@ -960,7 +960,7 @@ class AttentionEngine:
         if hour < 14 or hour >= 16:
             return
 
-        import discord_notifier as discord
+        import supabase_logger as discord
 
         signal = await _haiku_foundation_post(self._api_key, self._model)
         if signal:
@@ -994,7 +994,7 @@ class AttentionEngine:
 
         result = await _haiku_pattern_report(articles, self._api_key, self._model)
 
-        import discord_notifier as discord
+        import supabase_logger as discord
         if result:
             await discord.notify_pattern_report(
                 pattern=result.get("pattern", ""),

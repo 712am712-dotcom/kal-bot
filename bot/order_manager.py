@@ -9,7 +9,7 @@ Handles:
 import asyncio
 import structlog
 
-import discord_notifier as discord
+import supabase_logger as discord
 from kalshi_client import KalshiClient
 from db_logger import DBLogger
 from claude_client import MarketAnalysis

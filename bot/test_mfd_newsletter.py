@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
-import discord_notifier as discord
+import supabase_logger as discord
 import mfd_newsletter as _mfd
 
 
