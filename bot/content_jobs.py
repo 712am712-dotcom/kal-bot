@@ -36,11 +36,11 @@ log = logging.getLogger(__name__)
 # ── Template → brand + renderer defaults ─────────────────────────────────────
 
 _TEMPLATE_DEFAULTS: dict[str, dict] = {
-    "mfd-market-focus":      {"brand": "mfd", "renderer": "remotion", "format": "short-form-video"},
-    "mfd-market-reflection": {"brand": "mfd", "renderer": "remotion", "format": "short-form-video"},
-    "mfd-news-headline":     {"brand": "mfd", "renderer": "remotion", "format": "short-form-video"},
-    "mfd-educational":       {"brand": "mfd", "renderer": "remotion", "format": "short-form-video"},
-    "ae-signal":             {"brand": "ae",  "renderer": "remotion", "format": "short-form-video"},
+    "mfd-market-focus":      {"brand": "mfd", "renderer": "remotion", "format": "vertical_30s"},
+    "mfd-market-reflection": {"brand": "mfd", "renderer": "remotion", "format": "vertical_30s"},
+    "mfd-news-headline":     {"brand": "mfd", "renderer": "remotion", "format": "vertical_30s"},
+    "mfd-educational":       {"brand": "mfd", "renderer": "remotion", "format": "vertical_30s"},
+    "ae-signal":             {"brand": "ae",  "renderer": "remotion", "format": "vertical_30s"},
 }
 
 
