@@ -595,6 +595,20 @@ async def get_tomorrow_high_impact_events() -> list[dict]:
     ]
 
 
+async def get_today_high_impact_events() -> list[dict]:
+    """
+    Fetch HIGH impact USD events scheduled for today.
+    Returns list of event dicts (same shape as get_tomorrow_high_impact_events).
+    """
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    events = await _fetch_ff_calendar(next_week=False)
+    return [
+        e for e in events
+        if _impact_label(e.get("impact")) == "HIGH"
+        and e.get("date", "") == today_str
+    ]
+
+
 def build_day_before_alert(events: list[dict]) -> str:
     """
     Format the evening day-before macro preview.

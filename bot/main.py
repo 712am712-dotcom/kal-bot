@@ -67,6 +67,8 @@ from rss_reader import RSSReader
 from haiku_prefilter import HaikuPrefilter
 from vector_memory import VectorMemory
 from attention_engine import AttentionEngine
+from financial_datasets_client import FinancialDatasetsScanner
+import content_jobs as _content_jobs
 
 log = structlog.get_logger(__name__)
 
@@ -1905,6 +1907,30 @@ async def _newsletter_intel_task(
             log.warning("[newsletter-intel] scan cycle failed: %s", exc)
 
 
+# ── Financial Datasets scanner task ──────────────────────────────────────────
+
+async def _financial_datasets_task(interval_minutes: int = 30) -> None:
+    """
+    Scan financialdatasets.ai feeds every interval_minutes.
+    Writes scored signals to Supabase signals table.
+    Feeds: price snapshots, insider trades, 8-K filings, earnings feed, economic calendar.
+    """
+    scanner = FinancialDatasetsScanner()
+    interval_secs = interval_minutes * 60
+
+    # Initial delay — let other startup tasks settle
+    await asyncio.sleep(120)
+
+    while True:
+        try:
+            n = await scanner.scan()
+            if n > 0:
+                log.info("[fd-scanner] wrote %d signals", n)
+        except Exception as exc:
+            log.warning("[fd-scanner] scan failed: %s", exc)
+        await asyncio.sleep(interval_secs)
+
+
 # ── MFD newsletter task ────────────────────────────────────────────────────────
 
 async def _mfd_newsletter_task(model_override_fn=None) -> None:
@@ -2384,16 +2410,76 @@ async def _market_close_task(model_override_fn=None) -> None:
 async def _run_health_server() -> None:
     """Lightweight aiohttp health server — runs concurrently with the worker loop."""
     from aiohttp import web as _web
+    import json as _json
 
     async def health(_req: _web.Request) -> _web.Response:
-        import json as _json
         return _web.Response(
             text=_json.dumps({"status": "ok", "service": "kal"}),
             content_type="application/json",
         )
 
+    async def generate_content(_req: _web.Request) -> _web.Response:
+        """
+        POST /api/generate-content
+        Body: {"template": "mfd-market-focus", "brand": "mfd"}
+
+        Creates a content_jobs row (status=pending) for Scribe to pick up.
+        Returns: {"job_id": "...", "template": "...", "brand": "..."}
+        """
+        try:
+            body = await _req.json()
+        except Exception:
+            return _web.Response(
+                status=400,
+                text=_json.dumps({"error": "Invalid JSON body"}),
+                content_type="application/json",
+            )
+
+        template = str(body.get("template") or "").strip()
+        brand    = str(body.get("brand") or "mfd").strip()
+
+        if not template:
+            return _web.Response(
+                status=400,
+                text=_json.dumps({"error": "Missing required field: template"}),
+                content_type="application/json",
+            )
+
+        valid_templates = {
+            "mfd-market-focus", "mfd-market-reflection",
+            "mfd-news-headline", "mfd-educational", "ae-signal",
+        }
+        if template not in valid_templates:
+            return _web.Response(
+                status=400,
+                text=_json.dumps({
+                    "error": f"Unknown template '{template}'",
+                    "valid": sorted(valid_templates),
+                }),
+                content_type="application/json",
+            )
+
+        job_id = await _content_jobs.generate_content_job(template, brand)
+
+        if job_id:
+            return _web.Response(
+                text=_json.dumps({
+                    "job_id":   job_id,
+                    "template": template,
+                    "brand":    brand,
+                    "status":   "pending",
+                }),
+                content_type="application/json",
+            )
+        return _web.Response(
+            status=500,
+            text=_json.dumps({"error": "Failed to create content job — check Railway logs"}),
+            content_type="application/json",
+        )
+
     app = _web.Application()
     app.router.add_get("/health", health)
+    app.router.add_post("/api/generate-content", generate_content)
     runner = _web.AppRunner(app)
     await runner.setup()
     port = int(__import__("os").environ.get("PORT", 8000))
@@ -2527,6 +2613,7 @@ async def main_async() -> None:
             asyncio.create_task(_market_open_task())
             asyncio.create_task(_market_close_task(model_override_fn=_model_override_fn))
             asyncio.create_task(_attention_task(attention_engine))
+            asyncio.create_task(_financial_datasets_task(interval_minutes=30))
             # Keep process alive
             while True:
                 await asyncio.sleep(3600)
@@ -2583,6 +2670,7 @@ async def main_async() -> None:
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
             attention_task    = asyncio.create_task(_attention_task(attention_engine))
+            asyncio.create_task(_financial_datasets_task(interval_minutes=30))
 
             async def paper_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)
@@ -2668,6 +2756,7 @@ async def main_async() -> None:
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
             attention_task    = asyncio.create_task(_attention_task(attention_engine))
+            asyncio.create_task(_financial_datasets_task(interval_minutes=30))
 
             async def live_cycle() -> None:
                 return await run_live_scan(kalshi, claude, db, order_mgr, tracker, period_stats)
