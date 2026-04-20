@@ -1,8 +1,10 @@
-# Kal — Kalshi Crypto AI Trading Bot
+# Kal — Kalshi Trading Intelligence Agent
 
-An autonomous AI trading engine for [Kalshi](https://kalshi.com) crypto price prediction markets. Kal fetches live BTC/ETH/SOL spot prices from CoinGecko, feeds them into Claude for short-term price analysis, identifies edges vs the crowd's implied probability, and places trades when confidence and edge thresholds are met. All decisions are logged with full reasoning.
+Kal is Andre's personal trading intelligence agent. **Market Intelligence only.**
 
-Discord notifications for every decision, trade, and daily P&L summary.
+An autonomous AI trading engine for [Kalshi](https://kalshi.com) crypto price prediction markets. Kal fetches live BTC/ETH/SOL spot prices, feeds them into Claude for short-term price analysis, identifies edges vs the crowd's implied probability, and places trades when confidence and edge thresholds are met. All decisions are logged with full reasoning.
+
+Content intelligence (attention signals, content scoring, carousel generation) has been extracted to `ae-intel` — see `handoff/module2_extract.md`.
 
 ---
 

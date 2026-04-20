@@ -8,14 +8,8 @@ signals, not background reading. When a new email arrives from a tier-1 sender:
   3. Structured signal posted to #intelligence-feed
   4. Saved to Supabase bot_communications (message_type=newsletter_intel)
 
-Conflict/confirm check:
-  build_conflict_note(trade_today_text, recent_intel) does a keyword sweep of
-  recent tier-1 intel against The Trade Today asset names and returns a plain
-  English note appended to the Trade Today post — no extra Claude call needed.
-
 Called from main.py:
   - _newsletter_intel_task(): every 30 min, EmailReader instance passed in
-  - build_conflict_note(): called inside _gmail_brief_task before caching Trade Today
 
 UID dedup resets at midnight each day. Max MAX_INTEL_PER_DAY posts/day total.
 """
@@ -60,44 +54,6 @@ _processed_uids:  set[str] = set()
 _processed_date:  str      = ""
 _intel_count:     int      = 0
 _intel_date:      str      = ""
-
-# ── Asset keyword map — used for conflict detection (no Claude call) ───────────
-# Map common asset names / tickers to canonical labels.
-_ASSET_ALIASES: dict[str, str] = {
-    # Oil / energy
-    "oil":    "oil",  "crude":  "oil",  "wti":   "oil",  "brent": "oil",
-    "cl":     "oil",  "clz":   "oil",   "energy": "oil",  "opec":  "oil",
-    "lng":    "oil",  "gas":   "oil",
-    # Gold / metals
-    "gold":   "gold", "gld":  "gold",   "silver": "silver", "copper": "copper",
-    # Equities
-    "spx":    "SPX",  "spy":  "SPX",    "nasdaq": "NASDAQ", "qqq": "NASDAQ",
-    "dow":    "DOW",  "djia": "DOW",
-    # Rates / bonds
-    "yield":  "rates", "treasury": "rates", "10y": "rates", "2y": "rates",
-    "fed":    "rates", "rate":     "rates",
-    # Crypto
-    "bitcoin": "BTC", "btc":      "BTC",
-    "ethereum": "ETH", "eth":     "ETH",
-    "solana":  "SOL", "sol":      "SOL",
-    "crypto":  "crypto",
-    # Macro
-    "dollar":  "USD",  "dxy":    "USD",  "yen":   "JPY",  "euro": "EUR",
-    "china":   "China", "japan": "Japan", "iran":  "Iran",
-    "hormuz":  "oil",   "strait": "oil",  "opec":  "oil",
-}
-
-
-def _extract_assets(text: str) -> set[str]:
-    """Return the set of canonical asset labels mentioned in text."""
-    words = re.findall(r"\b[A-Za-z0-9]+\b", text.lower())
-    found: set[str] = set()
-    for w in words:
-        label = _ASSET_ALIASES.get(w)
-        if label:
-            found.add(label)
-    return found
-
 
 # ── IMAP fetch for tier-1 senders ─────────────────────────────────────────────
 
@@ -290,99 +246,6 @@ async def evaluate_tier1_email(
     except Exception as exc:
         log.warning("[tier1] Claude call failed for %s: %s", email_data["from_name"], exc)
         return None, cost
-
-
-# ── Supabase recent intel query ────────────────────────────────────────────────
-
-async def get_recent_tier1_intel(hours: int = 24) -> list[dict]:
-    """
-    Query Supabase bot_communications for recent newsletter_intel entries.
-    Returns list of {content, created_at} for the last `hours` hours.
-    Used by build_conflict_note() for cross-referencing Trade Today.
-    """
-    try:
-        from config import settings
-        if not settings.supabase_url or not settings.supabase_service_role_key:
-            return []
-
-        cutoff = (
-            datetime.datetime.utcnow() - datetime.timedelta(hours=hours)
-        ).isoformat() + "Z"
-
-        url = (
-            f"{settings.supabase_url}/rest/v1/bot_communications"
-            f"?message_type=eq.newsletter_intel"
-            f"&created_at=gte.{cutoff}"
-            f"&order=created_at.desc"
-            f"&limit=20"
-        )
-        headers = {
-            "apikey":        settings.supabase_service_role_key,
-            "Authorization": f"Bearer {settings.supabase_service_role_key}",
-        }
-        async with httpx.AsyncClient(timeout=8.0) as c:
-            r = await c.get(url, headers=headers)
-        if r.status_code == 200:
-            return r.json()
-        log.debug("[tier1] supabase query %s: %s", r.status_code, r.text[:100])
-    except Exception as exc:
-        log.debug("[tier1] supabase query failed: %s", exc)
-    return []
-
-
-# ── Conflict / confirm note ────────────────────────────────────────────────────
-
-def build_conflict_note(trade_today_text: str, recent_intel: list[dict]) -> str:
-    """
-    Compare The Trade Today text against recent tier-1 intel entries.
-    Returns a plain-English note if any asset overlap is found, else "".
-
-    Pure Python — no Claude call. Uses keyword matching via _ASSET_ALIASES.
-    The note is appended to the Trade Today Discord post.
-
-    Example output:
-      "**Newsletter cross-check:** Citrini Research (Apr 8) also covered oil —
-       directional alignment on crude. Check #intelligence-feed for full thesis."
-    """
-    if not recent_intel:
-        return ""
-
-    trade_assets = _extract_assets(trade_today_text)
-    if not trade_assets:
-        return ""
-
-    matches: list[str] = []
-    for entry in recent_intel:
-        content = entry.get("content", "")
-        intel_assets = _extract_assets(content)
-        overlap = trade_assets & intel_assets
-        if not overlap:
-            continue
-
-        # Extract source name from stored content (first line of formatted post)
-        source_match = re.search(r"📡\s*\*\*(.+?)\*\*", content)
-        source = source_match.group(1) if source_match else "Tier-1 research"
-
-        # Extract date from created_at
-        created = entry.get("created_at", "")
-        try:
-            dt  = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
-            day = dt.strftime("%b %-d")
-        except Exception:
-            day = "recent"
-
-        asset_str = " · ".join(sorted(overlap))
-        matches.append(f"{source} ({day}) — overlap on {asset_str}")
-
-    if not matches:
-        return ""
-
-    bullet_str = "\n".join(f"• {m}" for m in matches[:3])
-    return (
-        f"\n\n**Newsletter cross-check** — recent tier-1 research covers same assets:\n"
-        f"{bullet_str}\n"
-        f"_See #intelligence-feed for full thesis and trade ideas._"
-    )
 
 
 # ── Main scanner class ─────────────────────────────────────────────────────────

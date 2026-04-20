@@ -3,7 +3,6 @@ supabase_logger.py — Drop-in replacement for discord_notifier.py
 
 Routes all Kal output to Supabase instead of Discord:
   - Intelligence signals  → signals table
-  - Content jobs          → content_jobs table
   - Operational events    → agent_logs table
 
 All functions are async and match the original discord_notifier signatures
@@ -58,25 +57,6 @@ async def _signal(
         }).execute()
     except Exception as exc:
         log.warning("supabase_signal_failed source=%s error=%s", source, exc)
-
-
-async def _job(
-    brand: str,
-    template: str,
-    content: dict,
-    fmt: str = "newsletter",
-) -> None:
-    """Insert a pending content_job row."""
-    try:
-        _sb().table("content_jobs").insert({
-            "brand":    brand,
-            "template": template,
-            "content":  content,
-            "format":   fmt,
-            "status":   "pending",
-        }).execute()
-    except Exception as exc:
-        log.warning("supabase_job_failed template=%s error=%s", template, exc)
 
 
 async def _log(event: str, detail: Any = None, service: str = "kal") -> None:
@@ -147,28 +127,6 @@ async def notify_newsletter_signal(
     hook = one_liner[:300] if one_liner else subject[:300]
     why_now = thesis[:2000] if thesis else ""
     await _signal("MFD", topic, hook=hook, score=signal_score, why_now=why_now, source="newsletter")
-
-
-async def notify_attention_signal(
-    topic: str = "",
-    why_matters: str = "",
-    why_now: str = "",
-    score: int = 5,
-    sources: list | None = None,
-    **_: Any,
-) -> None:
-    await _signal("MFD", topic, hook=why_matters[:300], score=score,
-                  why_now=why_now, source="attention")
-
-
-async def notify_content_opportunity(signal: dict | None = None, **_: Any) -> None:
-    if not signal:
-        return
-    topic = signal.get("title") or signal.get("hook", "Content opportunity")
-    hook = signal.get("hook", "")[:300]
-    score = int(signal.get("final_score", 5))
-    why_now = signal.get("why_now", "")
-    await _signal("MFD", topic, hook=hook, score=score, why_now=why_now, source="attention")
 
 
 async def notify_rss_intel(post: dict | None = None, **_: Any) -> None:
@@ -258,33 +216,10 @@ async def notify_intelligence_summary(summary: str = "", **_: Any) -> None:
     await _log("intelligence_summary", {"summary": summary[:1000]})
 
 
-async def notify_pattern_report(
-    pattern: str = "",
-    evidence: list | None = None,
-    implication: str = "",
-    **_: Any,
-) -> None:
-    await _signal("MFD", pattern[:300], hook=implication[:200],
-                  score=7, why_now=implication, source="attention_pattern")
-
-
-async def notify_idea(idea: dict | str | None = None, **_: Any) -> None:
-    if isinstance(idea, dict):
-        topic = idea.get("title") or idea.get("hook", "Idea")
-        score = int(idea.get("score", 5))
-        why_now = idea.get("why_now", "")
-    else:
-        topic = str(idea)[:300] if idea else "Idea"
-        score = 5
-        why_now = ""
-    await _signal("AE", topic, score=score, why_now=why_now, source="ideas")
-
-
 # ── Content job functions ─────────────────────────────────────────────────────
 
 async def notify_todays_focus(focus: str = "", **_: Any) -> None:
-    """Trade Today brief → content_jobs as pending job."""
-    await _job("MFD", "trade_today", {"focus": focus}, fmt="newsletter")
+    """Trade Today brief → logged to agent_logs."""
     await _log("trade_today_posted", {"length": len(focus)})
 
 
@@ -297,15 +232,7 @@ async def notify_mfd_newsletter_draft(
     plain_text: str = "",
     **_: Any,
 ) -> None:
-    """MFD newsletter draft → content_jobs as pending job."""
-    await _job("MFD", "mfd_newsletter", {
-        "subject_a":    subject_a,
-        "subject_b":    subject_b,
-        "subject_c":    subject_c,
-        "preview_text": preview_text,
-        "html":         html,
-        "plain_text":   plain_text,
-    }, fmt="newsletter")
+    """MFD newsletter draft → logged to agent_logs."""
     await _log("mfd_newsletter_draft_created", {"subject_a": subject_a})
 
 

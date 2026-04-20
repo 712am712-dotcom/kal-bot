@@ -45,7 +45,7 @@ from scheduled_analysis import (
 from email_reader import EmailReader as GmailReader, build_morning_brief, extract_todays_focus, evaluate_axios_alert
 import email_reader as _er
 import newsletter_intel as _ni
-from newsletter_intel import NewsletterIntelScanner, build_conflict_note, get_recent_tier1_intel
+from newsletter_intel import NewsletterIntelScanner
 from technical_analysis import TechnicalAnalyzer
 from performance_tracker import PerformanceTracker
 import journal as journal_mod
@@ -62,13 +62,10 @@ from market_snapshot import (
     market_open_already_posted, mark_open_posted,
     market_close_already_posted, mark_close_posted,
 )
-from ideas_channel import evaluate_for_ideas, already_posted_today as ideas_posted_today
 from rss_reader import RSSReader
 from haiku_prefilter import HaikuPrefilter
 from vector_memory import VectorMemory
-from attention_engine import AttentionEngine
 from financial_datasets_client import FinancialDatasetsScanner
-import content_jobs as _content_jobs
 
 log = structlog.get_logger(__name__)
 
@@ -1768,17 +1765,9 @@ async def _gmail_brief_task(
             focus = extract_todays_focus(brief)
             today_str = datetime.date.today().isoformat()
             if focus:
-                conflict_note = ""
-                try:
-                    recent_intel = await get_recent_tier1_intel(hours=24)
-                    conflict_note = build_conflict_note(focus, recent_intel)
-                    if conflict_note:
-                        log.info("[brief_task] conflict note appended to Trade Today")
-                except Exception as _ce:
-                    log.debug("[brief_task] conflict check failed (non-fatal): %s", _ce)
                 _trade_today_cache = {
                     "date":  today_str,
-                    "focus": focus + conflict_note,
+                    "focus": focus,
                 }
                 log.info("[brief_task] trade_today cached (%d chars)", len(focus))
 
@@ -2182,27 +2171,6 @@ async def _intelligence_scan_task(
             log.warning("intelligence_scan_failed", error=str(exc))
 
 
-# ── Attention + Pattern task ─────────────────────────────────────────────────
-
-async def _attention_task(engine: "AttentionEngine") -> None:
-    """
-    Background task: runs every 30 min. Engine enforces 90-min internal throttle.
-
-    Each cycle:
-      - run_attention_check()  — posts signals in 8am and 7pm windows
-      - run_foundation_check() — posts 1 FOUNDATION post at 2pm
-      - run_pattern_check()    — posts daily pattern report at 5pm
-    """
-    while True:
-        await asyncio.sleep(30 * 60)   # check every 30 min
-        try:
-            await engine.run_attention_check()
-            await engine.run_foundation_check()
-            await engine.run_pattern_check()
-        except Exception as exc:
-            log.warning("attention_task_error", error=str(exc))
-
-
 # ── Startup credit probe ──────────────────────────────────────────────────────
 
 async def _startup_credit_check() -> None:
@@ -2439,68 +2407,8 @@ async def _run_health_server() -> None:
             content_type="application/json",
         )
 
-    async def generate_content(_req: _web.Request) -> _web.Response:
-        """
-        POST /api/generate-content
-        Body: {"template": "mfd-market-focus", "brand": "mfd"}
-
-        Creates a content_jobs row (status=pending) for Scribe to pick up.
-        Returns: {"job_id": "...", "template": "...", "brand": "..."}
-        """
-        try:
-            body = await _req.json()
-        except Exception:
-            return _web.Response(
-                status=400,
-                text=_json.dumps({"error": "Invalid JSON body"}),
-                content_type="application/json",
-            )
-
-        template = str(body.get("template") or "").strip()
-        brand    = str(body.get("brand") or "mfd").strip()
-
-        if not template:
-            return _web.Response(
-                status=400,
-                text=_json.dumps({"error": "Missing required field: template"}),
-                content_type="application/json",
-            )
-
-        valid_templates = {
-            "mfd-market-focus", "mfd-market-reflection",
-            "mfd-news-headline", "mfd-educational", "ae-signal",
-        }
-        if template not in valid_templates:
-            return _web.Response(
-                status=400,
-                text=_json.dumps({
-                    "error": f"Unknown template '{template}'",
-                    "valid": sorted(valid_templates),
-                }),
-                content_type="application/json",
-            )
-
-        job_id = await _content_jobs.generate_content_job(template, brand)
-
-        if job_id:
-            return _web.Response(
-                text=_json.dumps({
-                    "job_id":   job_id,
-                    "template": template,
-                    "brand":    brand,
-                    "status":   "pending",
-                }),
-                content_type="application/json",
-            )
-        return _web.Response(
-            status=500,
-            text=_json.dumps({"error": "Failed to create content job — check Railway logs"}),
-            content_type="application/json",
-        )
-
     app = _web.Application()
     app.router.add_get("/health", health)
-    app.router.add_post("/api/generate-content", generate_content)
     runner = _web.AppRunner(app)
     await runner.setup()
     port = int(__import__("os").environ.get("PORT", 8000))
@@ -2566,11 +2474,6 @@ async def main_async() -> None:
     intel_scanner    = IntelligenceScanner(kalshi)
     ta_analyzer      = TechnicalAnalyzer()
     news_intel       = NewsIntelligence(kalshi)
-    attention_engine = AttentionEngine(
-        api_key=settings.anthropic_api_key,
-        db=db,
-        haiku_model=settings.claude_fallback_model,
-    )
     # IMAP: prefer KAL_EMAIL_ADDRESS/PASSWORD (Outlook/any provider),
     # fall back to old KAL_GMAIL_ADDRESS/APP_PASSWORD for existing setups
     _imap_addr = (
@@ -2633,7 +2536,6 @@ async def main_async() -> None:
             asyncio.create_task(_economic_calendar_task(kalshi))
             asyncio.create_task(_market_open_task())
             asyncio.create_task(_market_close_task(model_override_fn=_model_override_fn))
-            asyncio.create_task(_attention_task(attention_engine))
             asyncio.create_task(_financial_datasets_task(interval_minutes=30))
             # Keep process alive
             while True:
@@ -2690,7 +2592,6 @@ async def main_async() -> None:
                 _market_close_task(model_override_fn=_model_override_fn)
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
-            attention_task    = asyncio.create_task(_attention_task(attention_engine))
             asyncio.create_task(_financial_datasets_task(interval_minutes=30))
 
             async def paper_cycle() -> None:
@@ -2712,7 +2613,6 @@ async def main_async() -> None:
                 _intelligence_scan_task(intel_scanner, interval_minutes=intel_interval)
             )
             asyncio.create_task(_ta_refresh_task(ta_analyzer, interval_minutes=15))
-            asyncio.create_task(_attention_task(attention_engine))
             await run_research_scan(kalshi, claude, db, tracker)
             log.info("research_complete_awaiting_funding")
             # Send performance report at end of research run
@@ -2776,7 +2676,6 @@ async def main_async() -> None:
                 _market_close_task(model_override_fn=_model_override_fn)
             )
             credit_check_task = asyncio.create_task(_credit_check_task())
-            attention_task    = asyncio.create_task(_attention_task(attention_engine))
             asyncio.create_task(_financial_datasets_task(interval_minutes=30))
 
             async def live_cycle() -> None:
