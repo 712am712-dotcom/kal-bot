@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     storyforge_url:    str = Field(default="", description="Storyforge base URL — e.g. https://app.storyforge.io")
     storyforge_api_key: str = Field(default="", description="Storyforge API key for /api/v2/generate")
 
+    # ── Personal Discord (Trade Today only) ──────────────────────────────────
+    discord_webhook_trade_today: str = Field(default="", description="Single personal Discord webhook — Trade Today brief posted at 5:55am ET")
+
     # ── Financial Datasets ────────────────────────────────────────────────────
     financial_datasets_api_key: str = Field(default="", description="financialdatasets.ai API key — market data, insider trades, SEC filings, earnings")
 

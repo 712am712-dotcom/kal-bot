@@ -1790,6 +1790,26 @@ async def _gmail_brief_task(
             log.warning("[brief_task] failed: %s", exc)
 
 
+async def _post_trade_today_discord(focus: str) -> None:
+    """
+    Post the Trade Today brief to one personal Discord channel via webhook.
+    Personal consumption only — not part of the agent communication layer.
+    No-ops silently if DISCORD_WEBHOOK_TRADE_TODAY is not set.
+    """
+    webhook_url = getattr(settings, "discord_webhook_trade_today", "")
+    if not webhook_url:
+        return
+    try:
+        today = datetime.date.today().strftime("%A, %B %-d")
+        payload = {"content": f"**The Trade Today — {today}**\n\n{focus}"}
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(webhook_url, json=payload)
+        if r.status_code not in (200, 204):
+            log.warning("[trade_today_discord] webhook %d: %s", r.status_code, r.text[:100])
+    except Exception as exc:
+        log.warning("[trade_today_discord] post failed: %s", exc)
+
+
 async def _trade_today_task() -> None:
     """
     Posts The Trade Today to #the-trade-today and #mfd-the-trade-today at
@@ -1836,6 +1856,7 @@ async def _trade_today_task() -> None:
                     log.info("[trade_today_task] posted to #the-trade-today + #mfd-the-trade-today")
                 except Exception as exc:
                     log.warning("[trade_today_task] post failed: %s", exc)
+                await _post_trade_today_discord(focus)
                 posted = True
                 break
             await asyncio.sleep(30)
